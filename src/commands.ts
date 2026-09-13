@@ -35,8 +35,13 @@ export interface SurfaceCommand {
    *  often opens a picker/input card instead). Shown by `/help` and in the
    *  README commands table; omit for a command that takes no argument. */
   readonly usage?: string;
-  /** Panel category grouping. */
-  readonly category: 'session' | 'chat' | 'system';
+  /**
+   * Panel category grouping. `agent` sits FIRST in the palette because these
+   * commands choose HOW the session runs (model, permission preset, agent
+   * preset, plan mode) rather than managing it — the most-reached-for group
+   * must not hide behind page 2.
+   */
+  readonly category: 'agent' | 'session' | 'chat' | 'system';
   /** Button label on the control panel; defaults to the command name. */
   readonly buttonLabel?: string;
   /**

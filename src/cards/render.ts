@@ -756,9 +756,15 @@ export interface PanelCommand {
   readonly category: string;
 }
 
-/** Command buttons per panel page (Feishu wraps the row; the repo-picker
- *  button fallback uses the same 8-per-page pattern). */
-export const PANEL_PAGE_SIZE = 8;
+/**
+ * Command buttons per panel page. Feishu wraps a long button row, so a page
+ * can carry more than the historical 8: the AGENT group (model / permission /
+ * agent preset / plan) plus the session and chat groups (4 + 5 + 1) must land
+ * on ONE first page — those mode commands are the ones users reach for, and a
+ * palette that hides them behind a page flip reads as "the panel has no
+ * preset" (user reports). The whole system block then keeps page 2.
+ */
+export const PANEL_PAGE_SIZE = 10;
 
 /** A panel page entry: a category header or one command button. */
 export type PanelPageEntry =
@@ -818,6 +824,7 @@ export function panelPages(
 function categoryLabel(category: string): string {
   // Known categories come from the catalog; an unknown id keeps the
   // capitalized fallback so a future category still renders labeled.
+  if (category === 'agent') return t('panel.category.agent');
   if (category === 'session') return t('panel.category.session');
   if (category === 'chat') return t('panel.category.chat');
   if (category === 'system') return t('panel.category.system');

@@ -2735,8 +2735,13 @@ describe('panel command palette', () => {
           ? el.actions.filter((a) => a.tag === 'button').map((a) => a.text.content)
           : [],
       ) ?? [];
-    // Page 1 holds the session group (7) plus chat (1) — 8 buttons; the
-    // system group (help/status + the dsh web wrappers) is on page 2.
+    // Page 1 carries the whole AGENT group (the commands that choose HOW the
+    // session runs) TOGETHER WITH the session and chat groups — one page, so
+    // the agent preset is visible without a page flip.
+    expect(labels).toContain('🤖 Model');
+    expect(labels).toContain('🔐 Permission');
+    expect(labels).toContain('🧩 Agent preset');
+    expect(labels).toContain('🗺️ Plan mode');
     expect(labels).toContain('🗂️ Sessions');
     expect(labels).toContain('➕ New chat');
     // /clear is the same action as /new and stays slash-only (one panel
@@ -2745,6 +2750,7 @@ describe('panel command palette', () => {
     // Resume lives inside the Sessions flow; a standalone button is
     // redundant (user report).
     expect(labels).not.toContain('↩️ Resume session');
+    // Page 2 holds the system group (help/status + the dsh web wrappers).
     await h.bridge.handleCardAction({
       messageId: lastCardId(h),
       chatId: 'oc_chat',
@@ -2758,11 +2764,9 @@ describe('panel command palette', () => {
           ? el.actions.filter((a) => a.tag === 'button').map((a) => a.text.content)
           : [],
       ) ?? [];
-    expect(labels2).toContain('🗺️ Plan mode');
-    expect(labels2).toContain('🤖 Model');
     expect(labels2).toContain('📤 Export');
     expect(labels2).toContain('🎯 Goal');
-    expect(labels2).toContain('🔐 Permission');
+    expect(labels2).toContain('🧹 Compact');
     // /panel is reachable as a slash line but its palette button is hidden —
     // a palette button that opens the panel would be the panel launching
     // itself (user report).
@@ -2884,6 +2888,7 @@ describe('panel command palette', () => {
       operatorOpenId: 'ou_user',
       value: { kind: 'panel' },
     });
+    // The system group (help among them) lives on page 2 — one flip.
     await h.bridge.handleCardAction({
       messageId: lastCardId(h),
       chatId: 'oc_chat',
@@ -2893,8 +2898,8 @@ describe('panel command palette', () => {
     // help/status/plan are direct-result commands: no input/confirm/picker
     // sub-view. The state-machine completion exit MUST patch the panel card
     // back to the menu root — that patch is what stops Lark from restoring
-    // the pre-click (page-1) card (user report: clicking help on page 2
-    // jumped back to page 1).
+    // the pre-click card (user report: clicking help on a later page jumped
+    // back to page 1).
     await h.bridge.handleCardAction({
       messageId: lastCardId(h),
       chatId: 'oc_chat',
@@ -3083,9 +3088,10 @@ describe('panel command palette', () => {
     expect(h.sessionMap.cwdFor('oc_chat')).toBe(target);
     expect(resultCardTexts(h).some((t) => t.includes('Working directory set to'))).toBe(true);
     // The panel returned to the menu root (same card, updated in place) and
-    // the outcome left the panel as an inert result card.
+    // the outcome left the panel as an inert result card. Page 1 is the agent
+    // group, so its marker is the agent-preset button.
     const menu = h.transport.updatedCards.at(-1);
-    expect(JSON.stringify(menu?.elements)).toContain('📁 Change dir');
+    expect(JSON.stringify(menu?.elements)).toContain('🧩 Agent preset');
     expect(h.transport.sentCards).toHaveLength(2); // input card + result card
   });
 
@@ -3130,9 +3136,9 @@ describe('panel command palette', () => {
       value: { kind: 'panel-confirm', command: 'clear' },
     });
     expect(resultCardTexts(h).some((t) => t.includes('nothing to clear'))).toBe(true);
-    // The panel returned to the menu root.
+    // The panel returned to the menu root (page 1 = the agent group).
     const menu = h.transport.updatedCards.at(-1);
-    expect(JSON.stringify(menu?.elements)).toContain('📁 Change dir');
+    expect(JSON.stringify(menu?.elements)).toContain('🧩 Agent preset');
   });
 
   it('a mutating command button is refused while working; read-only allowed', async () => {

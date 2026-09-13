@@ -461,7 +461,7 @@ export function registerSurfaceCommands(commands: CommandRegistry, host: Surface
     description:
       'Switch this session\u2019s model (bare opens the picker); /model <provider>/<model> switches directly',
     usage: '<provider/model>',
-    category: 'system',
+    category: 'agent',
     buttonLabel: t('command.cmd.model.label'),
     handler: async (invocation) => {
       const raw = invocation.rawInput.trim();
@@ -679,7 +679,7 @@ export function registerSurfaceCommands(commands: CommandRegistry, host: Surface
     name: 'permission',
     description: 'Switch the permission preset — sandbox mode + approval policy',
     usage: '<preset>',
-    category: 'system',
+    category: 'agent',
     buttonLabel: t('command.cmd.permission.label'),
     handler: async (invocation) => {
       const raw = invocation.rawInput.trim();
@@ -711,7 +711,7 @@ export function registerSurfaceCommands(commands: CommandRegistry, host: Surface
     name: 'preset',
     description: 'Switch the agent preset this chat composes sessions from',
     usage: '<id>',
-    category: 'system',
+    category: 'agent',
     buttonLabel: t('command.cmd.preset.label'),
     handler: async (invocation) => {
       if (options.agentPresets === undefined) {
@@ -738,7 +738,7 @@ export function registerSurfaceCommands(commands: CommandRegistry, host: Surface
     name: 'plan',
     description: 'Enter or leave plan mode (bare toggles; /plan on|off sets it)',
     usage: '[on|off]',
-    category: 'system',
+    category: 'agent',
     buttonLabel: t('command.cmd.plan.label'),
     handler: async (invocation) => {
       const raw = invocation.rawInput.trim();

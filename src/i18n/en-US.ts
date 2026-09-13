@@ -204,6 +204,7 @@ export const enMessages = {
   'panel.model.noneSelected': 'No model selected yet.',
   'panel.model.intro':
     '**Choose a model** — the pick switches THIS session’s model immediately and saves the default for new sessions.',
+  'panel.category.agent': '🤖 Agent',
   'panel.category.session': '🧩 Session',
   'panel.category.chat': '💬 Chat',
   'panel.category.system': '⚙️ System',
