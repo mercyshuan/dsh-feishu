@@ -11,7 +11,7 @@
  */
 
 import type { Agent } from '@deepseek-ai/dsh-agent';
-import type { PermissionPresetService } from '../../bridge.js';
+import type { AgentPresetsService, PermissionPresetService } from '../../bridge.js';
 import type { ModelOptionView } from '../../cards/render.js';
 import type { SessionDetailView, SessionRowView } from '../../cards/session-list.js';
 import type { CardJson } from '../../feishu/types.js';
@@ -38,6 +38,12 @@ export interface PanelViewContext {
   ensureAgent(chatId: string): Promise<Agent>;
   /** The permission-preset service, or `undefined` when not mounted. */
   permissionPresets(): PermissionPresetService | undefined;
+  /** The agent-preset roster service, or `undefined` when not mounted. */
+  agentPresets(): AgentPresetsService | undefined;
+  /** The chat's explicitly chosen agent preset, or `undefined` for the
+   *  deployment default (the choice applies to the chat's NEXT session — and
+   *  to a blank live agent immediately). */
+  selectedAgentPreset(chatId: string): string | undefined;
   /** Whether the session detail may show rename/archive (host seam present). */
   canMutateSessions: boolean;
 }

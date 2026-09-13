@@ -14,6 +14,7 @@
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type {
   AgentDefaultModelService,
+  AgentPresetsService,
   AgentStore,
   BridgeLogger,
   LlmService,
@@ -100,6 +101,7 @@ const COMMAND_HELP_KEYS: Readonly<Record<string, MessageKey>> = {
   compact: 'command.help.compact',
   feedback: 'command.help.feedback',
   permission: 'command.help.permission',
+  preset: 'command.help.preset',
   plan: 'command.help.plan',
 };
 
@@ -140,6 +142,11 @@ export interface SurfaceCommandHost {
       }>)
     | undefined;
   readonly permissionPresets: PermissionPresetService | undefined;
+  /** The agent-preset roster service (this bundle's `agent-presets` row), or
+   *  `undefined` when the deployment does not mount it. */
+  readonly agentPresets: AgentPresetsService | undefined;
+  /** Apply an agent-preset pick (blank session: immediately; else next). */
+  applyAgentPreset(chatId: string, agentPreset: string): Promise<CommandResult>;
   readonly planMode: PlanModeService | undefined;
   readonly agentDefaultModel: AgentDefaultModelService | undefined;
   readonly llm: LlmService | undefined;
@@ -691,6 +698,34 @@ export function registerSurfaceCommands(commands: CommandRegistry, host: Surface
       await options.pushPanel(invocation.chatId, {
         kind: 'picker',
         picker: 'permission',
+        page: 0,
+      });
+      return { kind: 'success', text: '' };
+    },
+  });
+  // /preset: an agent preset decides what this session CAN do (tools, persona,
+  // skills). A typed id applies through the surface helper — the harness has
+  // no agent-preset command to pass through to — while a bare /preset (or the
+  // panel button) opens the roster picker so the user can actually choose.
+  commands.register({
+    name: 'preset',
+    description: 'Switch the agent preset this chat composes sessions from',
+    usage: '<id>',
+    category: 'system',
+    buttonLabel: t('command.cmd.preset.label'),
+    handler: async (invocation) => {
+      if (options.agentPresets === undefined) {
+        return { kind: 'error', text: t('panel.action.agentPresetUnavailable') };
+      }
+      if (options.isWorking(invocation.chatId)) {
+        return { kind: 'error', text: t('command.error.turnRunning') };
+      }
+      const raw = invocation.rawInput.trim();
+      if (raw !== '') return options.applyAgentPreset(invocation.chatId, raw);
+      // The picker renders INSIDE the panel state machine.
+      await options.pushPanel(invocation.chatId, {
+        kind: 'picker',
+        picker: 'agent-preset',
         page: 0,
       });
       return { kind: 'success', text: '' };

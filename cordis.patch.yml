@@ -27,6 +27,17 @@
     - id: schedule
       name: '@deepseek-ai/dsh-schedule'
 
+    # The agent-preset roster (web-surface parity — the web-app bundle mounts
+    # the same package; dsh-base does not). It gives the panel's Agent-preset
+    # picker its roster and lets the bridge compose a session's agent from the
+    # chosen preset. `default` here is ONLY the deployment fallback: the user
+    # layer of `$DSH_HOME/settings.yaml` (`agent-presets.default`) overrides
+    # it, so it stays at the shipped `standard` rather than being pinned.
+    - id: agent-presets
+      name: '@deepseek-ai/dsh-agent-presets'
+      config:
+        default: standard
+
     # Durable workspace registry (session archive/restore, web-visible).
     # The workspace registry persists through the storage domain, so a
     # rename/archive on Feishu is observed by the dsh web UI sharing the

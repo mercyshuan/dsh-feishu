@@ -98,6 +98,45 @@ export class PermissionPickAction extends PanelAction {
   }
 }
 
+/** `agent-preset-pick` — compose the chat's agent from one agent preset.
+ *
+ *  Two outcomes share one path: a still-blank session is re-composed on the
+ *  spot, while a session that already ran a turn keeps its preset (the harness
+ *  fixes it) and the pick lands on the chat's NEXT session — the Bridge's
+ *  `applyAgentPreset` makes that call and reports which one happened. */
+export class AgentPresetPickAction extends PanelAction {
+  readonly kind = 'agent-preset-pick';
+  readonly allowedWhileWorking = false;
+  protected override busyTitle(): string {
+    return t('command.cmd.preset.label');
+  }
+  protected override work(
+    ctx: PanelActionContext,
+    action: CardAction,
+  ): Promise<CommandResult> {
+    // The dropdown stamps the marker only; the chosen id arrives in `option`.
+    const agentPreset = action.option ?? action.value.id;
+    if (agentPreset === undefined || agentPreset === '') {
+      return Promise.resolve({
+        kind: 'error',
+        text: t('panel.action.agentPresetPickInvalid'),
+      });
+    }
+    return ctx.applyAgentPreset(action.chatId, agentPreset);
+  }
+  protected override async finish(ctx: PanelActionContext, action: CardAction): Promise<void> {
+    // A navigation card (has a parent) pops back to the menu; a standalone
+    // card seeded by a typed command has no parent — it stays (shows the
+    // result posted by runPanelOperation) and redraws its current view so it
+    // is not left on the busy placeholder.
+    if (ctx.canReturn(action.chatId)) {
+      await ctx.popToMenu(action.chatId);
+    } else {
+      await ctx.replacePanel(action.chatId, ctx.panelViewFor(action.chatId));
+    }
+  }
+}
+
 /** `model-pick` — set the deployment default model. */
 export class ModelPickAction extends PanelAction {
   readonly kind = 'model-pick';
@@ -148,5 +187,6 @@ export class ModelPickAction extends PanelAction {
 export const PICK_ACTIONS: readonly PanelAction[] = [
   new RepoPickAction(),
   new PermissionPickAction(),
+  new AgentPresetPickAction(),
   new ModelPickAction(),
 ];
