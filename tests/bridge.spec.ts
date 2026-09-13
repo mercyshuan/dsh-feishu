@@ -37,6 +37,7 @@ import type {
   ChatStats,
   FeishuMessage,
   FeishuTransport,
+  QuotedMessage,
   SentCard,
 } from '../src/feishu/types.js';
 import { SessionMap } from '../src/session-map.js';
@@ -632,6 +633,122 @@ describe('Bridge', () => {
       const blocks = followups?.[0]?.content as unknown[];
       expect(JSON.stringify(blocks)).toContain('img-1');
       expect(JSON.stringify(blocks)).not.toContain('"type":"image"');
+    });
+  });
+
+  describe('inbound quotes', () => {
+    const pngBytes = new Uint8Array([137, 80, 78, 71]);
+
+    function quoted(overrides: Partial<QuotedMessage> = {}): QuotedMessage {
+      return {
+        messageId: 'om_parent',
+        senderOpenId: 'ou_other',
+        text: 'the original question',
+        attachments: [],
+        ...overrides,
+      };
+    }
+
+    /** The text blocks the first followup delivered to the agent. */
+    function firstBlocks(h: Harness): Array<{ type: string; text: string }> {
+      return (h.agentStore.followups.get('feishu-session-1')?.[0]?.content ?? []) as Array<{
+        type: string;
+        text: string;
+      }>;
+    }
+
+    it('injects the quoted message content into the turn, ahead of the user text', async () => {
+      const h = makeHarness();
+      await h.bridge.handleMessage(message({ text: 'what about this?', quoted: quoted() }));
+
+      const blocks = firstBlocks(h);
+      expect(blocks).toHaveLength(2);
+      expect(blocks[0]?.type).toBe('text');
+      expect(blocks[0]?.text).toContain('ou_other');
+      expect(blocks[0]?.text).toContain('om_parent');
+      expect(blocks[0]?.text).toContain('the original question');
+      expect(blocks[0]?.text).toContain('[End of the replied-to message]');
+      expect(blocks[1]).toEqual({ type: 'text', text: 'what about this?' });
+    });
+
+    it('saves a quoted image with its real path and posts no receipt card', async () => {
+      const h = makeHarness({
+        saveInboundFile: async ({ attachment, extension }) => {
+          expect(attachment.key).toBe('img_q');
+          expect(extension).toBe('png');
+          return { path: '/work/.dsh_feishu/attachments/img_q.png' };
+        },
+      });
+      h.transport.downloadImageImpl = async () => ({ data: pngBytes, mediaType: 'image/png' });
+      await h.bridge.handleMessage(
+        message({
+          quoted: quoted({ text: 'look at this', attachments: [{ kind: 'image', key: 'img_q' }] }),
+        }),
+      );
+
+      const blocks = firstBlocks(h);
+      expect(blocks[0]?.text).toContain('/work/.dsh_feishu/attachments/img_q.png');
+      expect(blocks[0]?.text).toContain('look at this');
+      // The quoted file was sent earlier, not now: no receipt card for it.
+      expect(
+        h.transport.sentCards.some((card) => card.header?.title.content === '📎 File received'),
+      ).toBe(false);
+    });
+
+    it('degrades a quoted attachment download failure to a loud note', async () => {
+      const h = makeHarness(); // no download impl → throws
+      await h.bridge.handleMessage(
+        message({
+          quoted: quoted({
+            text: '',
+            attachments: [{ kind: 'file', key: 'gone', name: 'gone.txt' }],
+          }),
+        }),
+      );
+      expect(firstBlocks(h)[0]?.text).toContain('download failed');
+    });
+
+    it('reports an unreadable quote instead of silently dropping it', async () => {
+      const h = makeHarness();
+      await h.bridge.handleMessage(
+        message({
+          quoted: quoted({ text: '', unavailable: 'the quoted message was recalled' }),
+        }),
+      );
+      const text = firstBlocks(h)[0]?.text ?? '';
+      expect(text).toContain('could not be read');
+      expect(text).toContain('recalled');
+    });
+
+    it('reports a quoted unsupported type by name', async () => {
+      const h = makeHarness();
+      await h.bridge.handleMessage(
+        message({ quoted: quoted({ text: '', unsupportedType: 'interactive' }) }),
+      );
+      expect(firstBlocks(h)[0]?.text).toContain('interactive');
+    });
+
+    it('a quoted bare attachment message starts its own turn (no pending wait)', async () => {
+      const h = makeHarness({
+        saveInboundFile: async () =>
+          Promise.resolve({ path: '/work/.dsh_feishu/attachments/q.png' }),
+      });
+      h.transport.downloadImageImpl = async () => ({ data: pngBytes, mediaType: 'image/png' });
+      await h.bridge.handleMessage(
+        message({
+          messageId: 'om_quote_img',
+          text: '',
+          quoted: quoted({ text: 'earlier context' }),
+          attachments: [{ kind: 'image', key: 'img_now' }],
+        }),
+      );
+
+      // Quoting IS an instruction: the turn runs now, with the quote and the
+      // fresh attachment in it.
+      const blocks = firstBlocks(h);
+      expect(blocks).toHaveLength(2);
+      expect(blocks[0]?.text).toContain('earlier context');
+      expect(blocks[1]?.text).toContain('/work/.dsh_feishu/attachments/q.png');
     });
   });
 

@@ -415,9 +415,10 @@ bridge 记住每个聊天的**最近被接受的发送者**（及其聊天类型
 
 **触发** —— `text` 为空且至少带一个附件的入站消息（裸 `file`/`image` 消息；
 `video` 与富文本 `post` 支持在兄弟特性 inbound-rich-text 中落地并复用本
-pending 路径）。此类消息**登记**（pending）而非投递：附件照常下载并保存到
-工作区，每份文件发一张**新**回执卡（旧卡保留——每份文件在聊天记录中可追溯），
-**不启动 turn**。
+pending 路径）。**回复/引用**一条更早消息的消息是**例外**——引用本身就是指令，
+直接开启自己的 turn（见兄弟特性 inbound-quotes）。此类消息**登记**（pending）
+而非投递：附件照常下载并保存到工作区，每份文件发一张**新**回执卡（旧卡保留
+——每份文件在聊天记录中可追溯），**不启动 turn**。
 
 pending 集是 per-chat 列表而非单槽：连续裸附件消息**追加**（每张新卡显示
 `📎 已收到 N 个文件`），用户可先发多份文件再发一条指令一起分析。
@@ -595,6 +596,112 @@ print(1)
   的有序占位符序列化是我们自己的设计，保留用户要求的气泡内顺序。
 - pending 路由复用兄弟特性 inbound-wait-instruction part（跟进文字排空；
   附件消息绕过群 mention gate，因为飞书无法从附件里 @）。
+
+## Part: inbound-quotes
+
+> 「引用」是请求的一部分。用户引用一条更早的飞书消息时，那条消息的内容
+> （文本，以及其媒体的已保存文件路径）会注入到本轮 turn 中，位置在用户
+> 自己的文字之前——agent 终于能看到「在回复什么」，用户不必再复制粘贴一遍。
+
+### 预期行为
+
+**触发** —— `im.message.receive_v1` 事件带 `parent_id`（用户回复/引用了
+一条更早的消息，p2p 或群聊均可）。飞书事件里**只有**父消息 id，正文需要
+第二次读取，所以引用是两段式流水线，其中 API 那一段归 transport。
+
+**解析（transport）** —— `normalizeMessageEvent` 把父消息 id 记为
+`FeishuMessage.quotedMessageId`（仍是纯函数，无 I/O）；transport 在把消息
+交给 bridge 之前补齐 `FeishuMessage.quoted`：
+
+| 步骤 | 调用 | 结果 |
+|---|---|---|
+| 读取 | `im.v1.message.get`（`/open-apis/im/v1/messages/{message_id}`，`user_id_type=open_id`） | 父消息条目：`msg_type`、`body.content`、`sender.id` |
+| 解析 | `parseMessageBody`——与实时入站消息**同一个**解析器 | `text` + 有序 `attachments`（引用的 `post` 保留 `<image N>` 占位符） |
+| 非文本类型 | 已知但不处理的 `msg_type`（interactive 卡片、sticker、folder…） | `unsupportedType`：只报**类型**，绝不转发原始 body（卡片 JSON 不是文本） |
+| 失败 | 已撤回（`deleted`）、`items` 为空、API 报错（缺 scope / 找不到）、body 无法解析 | `unavailable` 携带原因 |
+
+失败是**数据**而非异常：只要 `quotedMessageId` 存在，投递出去的消息就一定
+带 `quoted`。引用是用户明确的意图，必须以「有一条引用我读不到，请让用户
+重发」的形式到达 agent，而不是凭空消失（仓库规则：配置问题要响亮失败）。
+
+飞书 scope：现有 `im:message` 已覆盖该读取，`src/setup/feishu-manifest.json`
+不变。
+
+**投递（bridge）** —— `inboundContent` 先构建引用块，再构建用户自己的
+文字/附件：
+
+| 位置 | 内容块 |
+|---|---|
+| 1 | 一个包裹引用的文本块：头部 `[The user replied to an earlier message from <sender> (<id>) — its content follows]`、引用正文、每个引用附件一条备注、尾部 `[End of the replied-to message]` |
+| 2 | 用户自己的文字（不变） |
+| 3 | 用户自己的附件（不变） |
+
+头尾标记的存在是为了让 agent **不可能**把引用正文误当成用户自己的话。引用
+的媒体通过 message-resource 端点下载，且**以被引用消息的 id** 作参数（该
+端点按资源所属消息寻址，不是按回复消息），经现有入站 seam 落盘后，在引用块
+里以**真实路径**给出：`[quoted file: <name> — saved at <path>. You can read
+it with your file tools.]`
+
+**引用媒体不发回执卡** —— `📎 File received` 回执属于用户**此刻**发来的文件
+（inbound-attachments / inbound-wait-instruction）。引用是重读一条更早的消息，
+每次引用都发回执会刷屏聊天，因此引用附件只贡献路径备注。下载失败则降级为
+引用块里的一条响亮备注（`[quoted file: <name> — download failed, the content
+is not available]`）。
+
+**引用是一条指令，不是待命附件** —— 带附件但无文字的消息通常登记为 pending
+（inbound-wait-instruction），等用户补一句指令。引用消息是例外：引用一条更早
+的消息**本身就是**指令（「就那条，看看这个」），所以它直接开启自己的 turn，
+引用内容注入其中。
+
+**群 mention gate** —— 不变：引用与其他消息受到完全相同的门控（群聊文字仍需
+@ 机器人，或适用单人-单机器人放宽）。引用绝不绕过 gate。
+
+**状态与转移** —— 无新状态机：引用按消息解析（无状态），折叠进既有 turn 流水线。
+
+| 起点 | 事件 | 终点 | 副作用 |
+|---|---|---|---|
+| — | 带文字的引用 | turn 执行 | 引用块 + 用户文字在同一条用户消息里 |
+| — | 父消息是富文本 post | turn 执行 | 带 `<image N>` 占位符的引用文本 + 引用附件按路径保存 |
+| — | 父消息不可读 | turn 执行 | 引用块写明原因；用户文字不受影响 |
+| — | 父消息是卡片/sticker | turn 执行 | 引用块只报类型 |
+| — | 引用 + 附件但无文字 | turn 执行（**不**进 pending） | 引用块 + 新附件正常保存（其回执卡照常发） |
+
+**失败模式**：
+- `im.v1.message.get` 失败（缺 scope、限流、父消息不在机器人可见范围）：响亮
+  `warn` + 引用块里的 `unavailable`；turn 照常执行——引用绝不卡死聊天。
+- 父消息已撤回：`deleted` → `unavailable`（'the quoted message was recalled'）。
+- 引用附件下载/保存失败：响亮日志 + 引用块里的降级路径备注；用户本轮不受影响。
+- 引用出现在被排队（turn 正在跑）的消息里：引用在消息入队时即解析，排队的
+  turn 因此仍带引用。
+- 引用出现在 slash 命令里（把 `/help` 作为回复发出）：忽略——命令作用于命令行，
+  不作用于引用上下文。
+
+**验收清单**：
+- [ ] 回复一条文本消息 → 引用文本 + 发送者 id 注入 turn，且在用户文字**之前**（单测）
+- [ ] 被引用消息是富文本 post → 有序占位符与附件保留（单测）
+- [ ] 被引用的图片/文件经入站 seam 保存，引用块里给出**真实路径**，且**不发**
+      `📎 File received` 回执卡（单测）
+- [ ] 引用附件下载失败 → 降级为响亮备注（单测）
+- [ ] 不可读的引用（撤回 / API 报错 / 无法解析）以显式「读不到」块到达 agent，
+      绝不静默（单测）
+- [ ] 被引用的卡片（interactive）按类型上报（单测）
+- [ ] 带附件无文字的引用直接开启自己的 turn，而非登记 pending（单测）
+- [ ] 普通消息**不**产生额外飞书 API 调用（单测）
+- [ ] `normalizeMessageEvent` 对普通消息仍产出完全相同的形状（回归：
+      `quotedMessageId` 是「不存在」而不是 `undefined`）
+- [ ] 复用 `im:message` scope——manifest 不变（feishu-setup.md 描述不变）
+
+### Reference
+
+- 飞书 `im.message.receive_v1` 带 `parent_id`（被回复的消息）与 `root_id`
+  （话题根）——本特性跟随 `parent_id`：那才是用户明确引用的消息。
+- `im.v1.message.get`（`GET /open-apis/im/v1/messages/{message_id}`）返回
+  `data.items[]`，含 `msg_type` / `body.content` / `sender.id` / `deleted`；
+  现有 `im:message` scope 已覆盖。
+- botmux 对同一意图的处理不同（它只透传回复的父消息 id，把解析留给读者）——
+  在 transport 里解析正文，才能让引用真正被 agent 用起来。
+- `parseMessageBody` 与实时入站路径共用是刻意的：被引用的 `post` 必须与实时
+  的 `post` 说同一套占位符/附件语言。
 
 ## Part: turn-produced-files
 

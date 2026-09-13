@@ -123,6 +123,15 @@ Feishu user ──message──> Feishu platform ──WS long connection──>
   toggles + Submit, free-text captures the next chat message. Feature
   detection: absent approval/question services are logged loudly and
   nothing is mounted (see ux-spec §9).
+- **Inbound quotes.** A reply/quote (`parent_id`) carries only the parent's id,
+  so the transport resolves the quoted body through `im.v1.message.get` before
+  delivery and the bridge injects it into the turn AHEAD of the user's own text
+  as one explicit quote block (quoted text + quoted-media paths; quoted media
+  posts no receipt card). The quoted message is parsed by the same
+  `parseMessageBody` as a live message, and an unreadable quote (recalled, card
+  body, API error) reaches the agent as `unavailable` instead of vanishing. A
+  quoted message starts its own turn even when it carries attachments and no
+  text — it never enters the pending list.
 - **Configurable group mention gate.** `groupMentionMode` (botmux
   semantics): `always` requires an @-mention (relaxed in 1-person-1-bot solo
   groups via cached chat member counts); `never` answers every group message;

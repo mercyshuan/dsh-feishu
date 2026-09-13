@@ -38,8 +38,50 @@ export interface FeishuMessage {
    * learn the bot cannot process it). `undefined` for handled messages.
    */
   readonly unsupportedType?: string;
+  /**
+   * The message id this message replies to / quotes (Feishu `parent_id`).
+   * The event carries only the id — the body needs a second read — so the
+   * transport resolves it into {@link FeishuMessage.quoted} before delivery.
+   * `undefined` for a plain (non-reply) message.
+   */
+  readonly quotedMessageId?: string;
+  /**
+   * The replied-to message's content, resolved through the message-read API
+   * (`im.v1.message.get`). Present whenever {@link FeishuMessage.quotedMessageId}
+   * is set — including when the read failed, in which case
+   * {@link QuotedMessage.unavailable} says why (a user's explicit quote is
+   * never silently dropped). `undefined` for a plain message.
+   */
+  readonly quoted?: QuotedMessage;
   /** Unix epoch milliseconds from the Feishu `create_time` string. */
   readonly createdAt: number;
+}
+
+/**
+ * One resolved quoted (replied-to) message — the context a user attaches by
+ * replying to an earlier message.
+ */
+export interface QuotedMessage {
+  /** The quoted message's id (the event's `parent_id`). */
+  readonly messageId: string;
+  /** The quoted message's sender open id ('' when unknown). */
+  readonly senderOpenId: string;
+  /** The quoted message's plain text (empty for a media-only message). */
+  readonly text: string;
+  /** Media the quoted message carried, still resolvable via its own id. */
+  readonly attachments: readonly InboundAttachment[];
+  /**
+   * Set when the quoted message is a KNOWN-but-unhandled Feishu type
+   * (interactive card, sticker, …): its body is not text and is not
+   * forwarded — only the type is reported.
+   */
+  readonly unsupportedType?: string;
+  /**
+   * Set when the quote EXISTS but its content could not be read (recalled
+   * message, missing scope, API failure). Carries the reason; `text` and
+   * `attachments` are empty in that case.
+   */
+  readonly unavailable?: string;
 }
 
 /** One inbound media attachment normalized from a Feishu message. */

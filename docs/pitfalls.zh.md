@@ -98,6 +98,13 @@ harness 沙箱（以及本 checkout 的环境）有一些特定规则：
   `POST accounts.feishu.cn/accounts/qrlogin/init` 缺少它们会返回 4401
   "请求无效"——`{"unit":"eu_nc"}` 之类的响应体是障眼法，别被误导。发送
   `x-locale: zh-CN` + `x-terminal-type: 2`。
+- **回复/引用只带父消息 id——而 message-resource 端点按「资源所属消息」
+  寻址。** `im.message.receive_v1` 只在 `parent_id` 里给出父消息 id、不带正文，
+  因此被引用消息需要第二次读取（`im.v1.message.get`；现有 `im:message` scope
+  已覆盖）。被引用消息里带媒体时，下载要用**被引用消息**的 id
+  （`/messages/{message_id}/resources/{key}?type=…`）——用回复消息的 id 取到的是
+  回复自身（空）的资源集。被引用的 `interactive` 消息正文是飞书卡片 JSON 而非
+  文本：只上报**类型**，绝不转发正文。
 
 ## Gemini / modlens
 

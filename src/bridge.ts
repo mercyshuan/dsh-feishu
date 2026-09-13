@@ -51,6 +51,7 @@ import type {
   FeishuMessage,
   FeishuTransport,
   InboundAttachment,
+  QuotedMessage,
 } from './feishu/types.js';
 import { readLogFile } from './log-file.js';
 import { MessageDeduplicator } from './message-dedup.js';
@@ -922,7 +923,11 @@ export class Bridge {
     // cannot carry a mention (Feishu sends them without an input box), so
     // this is also where the mention gate is bypassed for groups — handled
     // in shouldRespond.
-    if (text === '' && (message.attachments?.length ?? 0) > 0) {
+    //
+    // A REPLY is the exception: quoting an earlier message IS an instruction
+    // ("about THAT, look at this"), so the quoted content must reach the agent
+    // in this very turn instead of waiting in the pending list.
+    if (text === '' && (message.attachments?.length ?? 0) > 0 && message.quoted === undefined) {
       this.options.logger.debug(
         `message ${message.messageId} -> pending attachment (chat ${message.chatId})`,
       );
@@ -2184,16 +2189,23 @@ export class Bridge {
 
   /**
    * Build the agent-visible content blocks for one inbound message. Text
-   * messages pass through unchanged. Image attachments are downloaded and
-   * committed through the attachment seam, then injected as `image` content
-   * blocks; file attachments post a receipt card and contribute a
-   * file-name note. Failures notice loudly and degrade to text-only — the
-   * message is never silently dropped.
+   * messages pass through unchanged. A reply/quote contributes the quoted
+   * message's own content FIRST (the user's request is about it, so it is
+   * part of the request — Feishu ships only the parent id and the transport
+   * resolved the body). Image attachments are downloaded and committed
+   * through the attachment seam, then injected as `image` content blocks;
+   * file attachments post a receipt card and contribute a file-name note.
+   * Failures notice loudly and degrade to text-only — the message is never
+   * silently dropped.
    * @param message - the normalized inbound message.
    * @returns the content blocks for the agent's user message.
    */
   private async inboundContent(message: FeishuMessage): Promise<ContentBlock[]> {
     const blocks: ContentBlock[] = [];
+    // The quote comes first: it is the context the request refers to.
+    if (message.quoted !== undefined) {
+      blocks.push(...(await this.quotedContent(message, message.quoted)));
+    }
     if (message.text !== '') blocks.push({ type: 'text', text: message.text });
     // `attachments` is always present on normalized messages; the guard
     // covers transport-level JSON without the field (defensive only).
@@ -2206,6 +2218,74 @@ export class Bridge {
     }
     if (blocks.length === 0) blocks.push({ type: 'text', text: message.text });
     return blocks;
+  }
+
+  /**
+   * Build the agent-visible blocks for a quoted (replied-to) message.
+   *
+   * The quoted body is wrapped in explicit header/footer lines so the agent
+   * can never mistake the quote for the user's own words. A quote the bot
+   * could not read, or one of a type it cannot render, still produces a block
+   * naming the problem — a quote is user intent and never disappears
+   * silently. Quoted media is saved through the same inbound seam (with its
+   * real path) but posts NO receipt card: the user sent that file earlier,
+   * not now.
+   * @param message - the replying message (carries the chat id).
+   * @param quoted - the resolved quoted message.
+   * @returns the content blocks for the quote.
+   */
+  private async quotedContent(
+    message: FeishuMessage,
+    quoted: QuotedMessage,
+  ): Promise<ContentBlock[]> {
+    if (quoted.unavailable !== undefined) {
+      this.options.logger.warn(
+        `inbound quote ${quoted.messageId} unreadable (chat ${message.chatId}): ${quoted.unavailable}`,
+      );
+      return [
+        {
+          type: 'text',
+          text: `[The user replied to a message (${quoted.messageId}) whose content could not be read: ${quoted.unavailable}. Tell the user the quote is unreadable and ask them to resend it if it matters.]`,
+        },
+      ];
+    }
+    if (quoted.unsupportedType !== undefined) {
+      this.options.logger.debug(
+        `inbound quote ${quoted.messageId} unsupported type ${quoted.unsupportedType} (chat ${message.chatId})`,
+      );
+      return [
+        {
+          type: 'text',
+          text: `[The user replied to a message (${quoted.messageId}) of a type this surface cannot read: ${quoted.unsupportedType}. Its content is not available.]`,
+        },
+      ];
+    }
+    const sender = quoted.senderOpenId === '' ? 'unknown sender' : quoted.senderOpenId;
+    const lines = [
+      `[The user replied to an earlier message from ${sender} (${quoted.messageId}) — its content follows]`,
+    ];
+    if (quoted.text !== '') lines.push(quoted.text);
+    for (const attachment of quoted.attachments) {
+      // The resource endpoint is keyed by the OWNING message, so the quoted
+      // message's own id (not the reply's) must drive the download.
+      const pending = await this.saveInboundFileAttachment(
+        { ...message, messageId: quoted.messageId },
+        attachment,
+      );
+      lines.push(
+        pending.savedPath === undefined
+          ? `[quoted file: ${pending.name} — download failed, the content is not available]`
+          : `[quoted file: ${pending.name} — saved at ${pending.savedPath}. You can read it with your file tools.]`,
+      );
+      this.options.logger.debug(
+        `inbound quote ${quoted.messageId} attachment ${attachment.kind} ${attachment.key}: ${pending.savedPath ?? 'no path'} (chat ${message.chatId})`,
+      );
+    }
+    lines.push('[End of the replied-to message]');
+    this.options.logger.debug(
+      `inbound quote ${quoted.messageId} -> ${quoted.text.length} chars, ${quoted.attachments.length} attachment(s) (chat ${message.chatId})`,
+    );
+    return [{ type: 'text', text: lines.join('\n') }];
   }
 
   /** Download + persist one inbound file under the chat's working directory,

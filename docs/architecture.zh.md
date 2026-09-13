@@ -69,6 +69,7 @@ Feishu user ──message──> Feishu platform ──WS long connection──>
 - **工作目录 gate。** 没有显式固定 cwd（/repo 或 /cd）的聊天会带着指引拒绝回合——不创建 session/卡片，消息也不会被记住；`defaultCwd` 永远不会是隐式选择（`requireWorkingDir`，默认为 true）。`/clear` 保留固定；`/resume` 采用被恢复 session 的 cwd（选择器按钮值，或 session-list 查找），使恢复后的聊天保持可用（见 ux-spec §8.3）。
 - **交互式审批。** `ctx.on('approval/request')` 发布一张审批卡片（工具 + 原因，Allow once / Reject），并通过共享的 `InteractionRegistry` 结算——来自卡片回调的 `'allowed-once'` / `'rejected'`，信号中止或超时时的 `'cancelled'`，当聊天未知或卡片失败时 fail-closed 的 `'unavailable'`。已决定的卡片是一张静态的无按钮卡片。
 - **交互式提问。** `ctx.userQuestions.registerProvider` 通过提问卡片回答问题：单选点击即答，多选开关 + Submit，自由文本捕获下一条聊天消息。特性检测：缺失的审批/提问服务会被大声记录日志，且不会挂载任何东西（见 ux-spec §9）。
+- **入站引用。** 回复/引用（`parent_id`）只带父消息 id，因此 transport 在投递前用 `im.v1.message.get` 解析被引用正文，bridge 再把该内容作为**一个**显式引用块注入到用户自己的文字**之前**（引用文本 + 引用媒体的文件路径；引用媒体不发回执卡）。被引用消息与实时消息共用同一个 `parseMessageBody` 解析；读不到的引用（已撤回、卡片正文、API 报错）以 `unavailable` 到达 agent，而不是凭空消失。带附件却无文字的引用消息也直接开启自己的 turn——绝不进入 pending 列表。
 - **可配置的群提及 gate。** `groupMentionMode`（botmux 语义）：`always` 要求 @ 提及（在 1 人 1 bot 的独享群中通过缓存的群成员数放宽）；`never` 回答每一条群消息；`ambient` 在消息被重定向给其他成员时让位；`topic` 在话题落地前行为同 `always`。`allowedChats` 限制哪些聊天会被服务；`allowedUsers` 限制哪些发送者的 open id 会被服务（未列入名单的用户发来的消息和卡片按钮会被忽略）。
 - **两阶段反应确认。** 被接受的回合消息会得到一个已收到反应（默认 `GoGoGo`），在回合结束时换成 `DONE` / `WARN` / `WARN`（可通过 `reactions` 配置覆盖）；失败只记日志。
 - **主动 @ 提及。** 每个聊天最后被接受的发送者会被记住；群错误通知、审批卡片和提问卡片都会 @ 提及该请求者，以便把正确的人拉进来。

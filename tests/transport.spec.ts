@@ -7,13 +7,16 @@
 import { Readable } from 'node:stream';
 import type { RawMessageEvent } from '@larksuiteoapi/node-sdk';
 import { describe, expect, it, vi } from 'vitest';
+import type { FeishuMessage } from '../src/feishu/types.js';
 import {
   FEISHU_HTTP,
   FeishuApiError,
   LarkTransport,
   normalizeCardAction,
   normalizeMessageEvent,
+  normalizeQuotedMessage,
   parseBotOpenId,
+  parseMessageBody,
 } from '../src/transport.js';
 
 /** A minimal raw event with the fields the normalizer reads. */
@@ -214,6 +217,220 @@ describe('normalizeMessageEvent', () => {
       rawEvent({ message: { message_type: 'post', content: 'not json' } }),
     );
     expect(message).toBeUndefined();
+  });
+
+  it('records a reply/quote parent id as quotedMessageId', () => {
+    const message = normalizeMessageEvent(
+      rawEvent({ message: { parent_id: 'om_parent' } as never }),
+    );
+    expect(message?.quotedMessageId).toBe('om_parent');
+    // The body is NOT resolved here — the transport owns that API call.
+    expect(message?.quoted).toBeUndefined();
+  });
+
+  it('omits quotedMessageId for a plain message', () => {
+    expect(normalizeMessageEvent(rawEvent())).not.toHaveProperty('quotedMessageId');
+  });
+
+  it('keeps quotedMessageId on an unsupported-type message', () => {
+    const message = normalizeMessageEvent(
+      rawEvent({
+        message: {
+          message_type: 'sticker',
+          content: '{}',
+          parent_id: 'om_parent',
+        } as never,
+      }),
+    );
+    expect(message?.unsupportedType).toBe('sticker');
+    expect(message?.quotedMessageId).toBe('om_parent');
+  });
+});
+
+describe('parseMessageBody', () => {
+  it('parses text (mentions stripped) and image bodies', () => {
+    expect(
+      parseMessageBody('text', JSON.stringify({ text: 'hi <at user_id="ou_x">@bot</at> there' })),
+    ).toEqual({ text: 'hi there', attachments: [] });
+    expect(parseMessageBody('image', JSON.stringify({ image_key: 'img_1' }))).toEqual({
+      text: '',
+      attachments: [{ kind: 'image', key: 'img_1' }],
+    });
+  });
+
+  it('returns undefined for a malformed body', () => {
+    expect(parseMessageBody('text', 'not json')).toBeUndefined();
+    expect(parseMessageBody('image', JSON.stringify({}))).toBeUndefined();
+  });
+});
+
+describe('normalizeQuotedMessage', () => {
+  /** A `im.v1.message.get` response carrying one item. */
+  function response(overrides: Record<string, unknown> = {}): unknown {
+    return {
+      code: 0,
+      data: {
+        items: [
+          {
+            message_id: 'om_parent',
+            msg_type: 'text',
+            body: { content: JSON.stringify({ text: 'the original question' }) },
+            sender: { id: 'ou_author' },
+            ...overrides,
+          },
+        ],
+      },
+    };
+  }
+
+  it('reads a quoted text message into text + sender', () => {
+    expect(normalizeQuotedMessage(response(), 'om_parent')).toEqual({
+      messageId: 'om_parent',
+      senderOpenId: 'ou_author',
+      text: 'the original question',
+      attachments: [],
+    });
+  });
+
+  it('keeps a quoted rich-text post ordered attachments and placeholders', () => {
+    const quoted = normalizeQuotedMessage(
+      response({
+        msg_type: 'post',
+        body: {
+          content: JSON.stringify({
+            content: [[{ tag: 'text', text: 'see:' }], [{ tag: 'img', image_key: 'img_1' }]],
+          }),
+        },
+      }),
+      'om_parent',
+    );
+    expect(quoted.text).toBe('see:\n<image 1>');
+    expect(quoted.attachments).toEqual([{ kind: 'image', key: 'img_1' }]);
+    expect(quoted.unavailable).toBeUndefined();
+  });
+
+  it('reads a quoted image message as an attachment, not as text', () => {
+    const quoted = normalizeQuotedMessage(
+      response({
+        msg_type: 'image',
+        body: { content: JSON.stringify({ image_key: 'img_9' }) },
+      }),
+      'om_parent',
+    );
+    expect(quoted.text).toBe('');
+    expect(quoted.attachments).toEqual([{ kind: 'image', key: 'img_9' }]);
+  });
+
+  it('reports a quoted card (interactive) by type instead of forwarding its body', () => {
+    const quoted = normalizeQuotedMessage(
+      response({ msg_type: 'interactive', body: { content: '{"schema":"2.0"}' } }),
+      'om_parent',
+    );
+    expect(quoted.unsupportedType).toBe('interactive');
+    expect(quoted.text).toBe('');
+    expect(quoted.attachments).toEqual([]);
+  });
+
+  it('surfaces an API error as unavailable instead of throwing', () => {
+    const quoted = normalizeQuotedMessage({ code: 230098, msg: 'message not found' }, 'om_parent');
+    expect(quoted.unavailable).toContain('message not found');
+    expect(quoted.text).toBe('');
+  });
+
+  it('surfaces a missing or recalled quoted message as unavailable', () => {
+    expect(
+      normalizeQuotedMessage({ code: 0, data: { items: [] } }, 'om_parent').unavailable,
+    ).toContain('not readable');
+    expect(normalizeQuotedMessage(response({ deleted: true }), 'om_parent').unavailable).toContain(
+      'recalled',
+    );
+  });
+
+  it('surfaces an unparseable quoted body as unavailable', () => {
+    const quoted = normalizeQuotedMessage(response({ body: { content: 'not json' } }), 'om_parent');
+    expect(quoted.unavailable).toContain('could not be parsed');
+  });
+});
+
+describe('LarkTransport quoted messages', () => {
+  function quoteTransport(get: unknown): LarkTransport {
+    const transport = new LarkTransport({
+      credentials: { appId: 'cli_test', appSecret: 'secret' },
+    });
+    // Swap in a fake SDK client (never started here, so no network).
+    (transport as unknown as { client: { im: { v1: { message: { get: unknown } } } } }).client = {
+      im: { v1: { message: { get } } },
+    } as never;
+    return transport;
+  }
+
+  function inbound(overrides: Partial<FeishuMessage> = {}): FeishuMessage {
+    return {
+      messageId: 'om_reply',
+      chatId: 'oc_chat',
+      chatType: 'p2p',
+      senderOpenId: 'ou_user',
+      text: 'what about this?',
+      mentions: [],
+      attachments: [],
+      createdAt: 1_700_000_000_000,
+      ...overrides,
+    };
+  }
+
+  async function deliver(
+    transport: LarkTransport,
+    message: FeishuMessage,
+  ): Promise<FeishuMessage[]> {
+    const delivered: FeishuMessage[] = [];
+    transport.onMessage((m) => delivered.push(m));
+    await (
+      transport as unknown as { deliverInbound(m: FeishuMessage): Promise<void> }
+    ).deliverInbound(message);
+    return delivered;
+  }
+
+  it('resolves the quoted parent and attaches it to the delivered message', async () => {
+    const get = vi.fn().mockResolvedValue({
+      code: 0,
+      data: {
+        items: [
+          {
+            msg_type: 'text',
+            body: { content: JSON.stringify({ text: 'the earlier message' }) },
+            sender: { id: 'ou_other' },
+          },
+        ],
+      },
+    });
+    const delivered = await deliver(quoteTransport(get), inbound({ quotedMessageId: 'om_parent' }));
+
+    expect(get).toHaveBeenCalledWith({
+      path: { message_id: 'om_parent' },
+      params: { user_id_type: 'open_id' },
+    });
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]?.quoted).toEqual({
+      messageId: 'om_parent',
+      senderOpenId: 'ou_other',
+      text: 'the earlier message',
+      attachments: [],
+    });
+    // The reply's own fields survive the hydration.
+    expect(delivered[0]?.text).toBe('what about this?');
+  });
+
+  it('delivers an unreadable quote as unavailable instead of dropping it', async () => {
+    const get = vi.fn().mockRejectedValue(new Error('boom'));
+    const delivered = await deliver(quoteTransport(get), inbound({ quotedMessageId: 'om_parent' }));
+    expect(delivered[0]?.quoted?.unavailable).toContain('boom');
+  });
+
+  it('reads no parent for a plain message (no extra API call)', async () => {
+    const get = vi.fn();
+    const delivered = await deliver(quoteTransport(get), inbound());
+    expect(get).not.toHaveBeenCalled();
+    expect(delivered[0]?.quoted).toBeUndefined();
   });
 });
 

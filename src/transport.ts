@@ -32,6 +32,7 @@ import type {
   FeishuMessage,
   FeishuTransport,
   InboundAttachment,
+  QuotedMessage,
   SentCard,
 } from './feishu/types.js';
 import { serializePost } from './rich-text.js';
@@ -155,14 +156,65 @@ function parseAttachment(content: string, messageType: string): InboundAttachmen
 }
 
 /**
+ * Parse one message body (`message_type` + raw `content` JSON) into the
+ * surface's text + attachment view. Shared by the live inbound message and a
+ * quoted (replied-to) message read back through `im.v1.message.get`, so both
+ * speak the same vocabulary (ordered `<image N>` placeholders, attachment
+ * list, mention stripping). Pure function — unit-testable without any SDK
+ * connection.
+ * @param messageType - the Feishu `message_type`.
+ * @param content - the raw `content` JSON string.
+ * @returns the parsed text + attachments, or `undefined` when a supported
+ *   type carries a malformed body (the raw JSON is never delivered as text).
+ */
+export function parseMessageBody(
+  messageType: string,
+  content: string,
+): { text: string; attachments: InboundAttachment[] } | undefined {
+  if (messageType === 'text') {
+    let text: string;
+    try {
+      const parsed = JSON.parse(content) as { text?: string };
+      text = parsed.text ?? '';
+    } catch {
+      return undefined;
+    }
+    return {
+      text: text.replace(MENTION_PATTERN, ' ').replace(/\s+/g, ' ').trim(),
+      attachments: [],
+    };
+  }
+  if (messageType === 'post') {
+    // Rich text: serialize the inline element order into a markdown-ish
+    // string with `<image N>` / `<video N>` placeholders, plus the ordered
+    // attachment list. Malformed content degrades to a loud-ignored message.
+    const serialized = serializePost(content);
+    if (serialized === undefined) return undefined;
+    return { text: serialized.text, attachments: [...serialized.attachments] };
+  }
+  const attachment = parseAttachment(content, messageType);
+  // A malformed image/file content (no key) is not a usable body.
+  if (attachment === undefined) return undefined;
+  return { text: '', attachments: [attachment] };
+}
+
+/**
  * Normalize a raw Feishu `im.message.receive_v1` payload into a surface
  * message, or `undefined` when the message is not a supported type.
  * Pure function — unit-testable without any SDK connection.
+ *
+ * A reply/quote carries only its parent's id in the event; this function
+ * records that id as `quotedMessageId` and leaves the body resolution to the
+ * transport (which owns the API call).
  * @param data - the raw event payload.
  * @returns the normalized message, or `undefined` to ignore.
  */
 export function normalizeMessageEvent(data: RawMessageEvent): FeishuMessage | undefined {
   const message = data.message;
+  const senderOpenId = data.sender?.sender_id?.open_id ?? '';
+  const parentId = (message as { readonly parent_id?: unknown }).parent_id;
+  const quotedMessageId =
+    typeof parentId === 'string' && parentId !== '' ? { quotedMessageId: parentId } : {};
   if (!SUPPORTED_MESSAGE_TYPES.has(message.message_type)) {
     // A known-but-unhandled Feishu type (folder, sticker, …) is surfaced as
     // an unsupported-type notice instead of vanishing; unknown types are
@@ -172,58 +224,99 @@ export function normalizeMessageEvent(data: RawMessageEvent): FeishuMessage | un
         messageId: message.message_id,
         chatId: message.chat_id,
         chatType: message.chat_type === 'group' ? 'group' : 'p2p',
-        senderOpenId: data.sender?.sender_id?.open_id ?? '',
+        senderOpenId,
         text: '',
         attachments: [],
         mentions: [],
         unsupportedType: message.message_type,
+        ...quotedMessageId,
         createdAt: Number(message.create_time) || Date.now(),
       };
     }
     return undefined;
   }
-  const senderOpenId = data.sender?.sender_id?.open_id ?? '';
-  let text = '';
-  let attachments: InboundAttachment[] = [];
-  if (message.message_type === 'text') {
-    try {
-      const parsed = JSON.parse(message.content) as { text?: string };
-      text = parsed.text ?? '';
-    } catch {
-      return undefined;
-    }
-    text = text.replace(MENTION_PATTERN, ' ').replace(/\s+/g, ' ').trim();
-  } else if (message.message_type === 'post') {
-    // Rich text: serialize the inline element order into a markdown-ish
-    // string with `<image N>` / `<video N>` placeholders, plus the ordered
-    // attachment list. Malformed content degrades to a loud-ignored message
-    // (the raw JSON is never delivered to the agent as text).
-    const serialized = serializePost(message.content);
-    if (serialized === undefined) {
-      // Loud log at the transport boundary (no logger here — the bridge
-      // logs dropped messages; return undefined to ignore).
-      return undefined;
-    }
-    text = serialized.text;
-    attachments = [...serialized.attachments];
-  } else {
-    const attachment = parseAttachment(message.content, message.message_type);
-    // A malformed image/file content (no key) is not a usable message.
-    if (attachment === undefined) return undefined;
-    attachments = [attachment];
-  }
+  const body = parseMessageBody(message.message_type, message.content);
+  if (body === undefined) return undefined;
   return {
     messageId: message.message_id,
     chatId: message.chat_id,
     chatType: message.chat_type === 'group' ? 'group' : 'p2p',
     senderOpenId,
-    text,
-    attachments,
+    text: body.text,
+    attachments: body.attachments,
     mentions: (message.mentions ?? [])
       .map((mention) => mention.id?.open_id)
       .filter((id): id is string => id !== undefined && id !== ''),
+    ...quotedMessageId,
     createdAt: Number(message.create_time) || Date.now(),
   };
+}
+
+/**
+ * Normalize an `im.v1.message.get` response into the quoted-message view the
+ * bridge renders into the turn's content. Pure function — unit-testable
+ * without any SDK connection.
+ *
+ * Failure is DATA, not an exception: a quote the bot cannot read (recalled
+ * message, missing scope, unsupported card body) still returns a
+ * {@link QuotedMessage} with `unavailable` set, because the user's explicit
+ * quote must reach the agent as "there was a quote I could not read" instead
+ * of vanishing.
+ * @param response - the parsed response body (`{code, msg, data:{items}}`).
+ * @param messageId - the quoted message's id (echoed on the result).
+ * @returns the quoted message's text + attachments, or the failure reason.
+ */
+export function normalizeQuotedMessage(response: unknown, messageId: string): QuotedMessage {
+  const unavailable = (reason: string): QuotedMessage => ({
+    messageId,
+    senderOpenId: '',
+    text: '',
+    attachments: [],
+    unavailable: reason,
+  });
+  const body = response as {
+    code?: number;
+    msg?: string;
+    data?: { items?: readonly unknown[] };
+  } | null;
+  const code = body?.code ?? -1;
+  if (code !== 0) {
+    return unavailable(
+      `feishu im.v1.message.get failed: ${body?.msg ?? 'unknown error'} (code ${code})`,
+    );
+  }
+  const item = body?.data?.items?.[0] as
+    | {
+        msg_type?: string;
+        body?: { content?: string };
+        sender?: { id?: string };
+        deleted?: boolean;
+      }
+    | undefined;
+  if (item === undefined) {
+    return unavailable(
+      'the quoted message is not readable (recalled, or the bot has no access to it)',
+    );
+  }
+  if (item.deleted === true) return unavailable('the quoted message was recalled');
+  const messageType = item.msg_type ?? '';
+  const senderOpenId = item.sender?.id ?? '';
+  if (!SUPPORTED_MESSAGE_TYPES.has(messageType)) {
+    // Known-but-unhandled (interactive card, sticker, …) and unknown types
+    // alike: report the TYPE, never the raw body (a card's JSON is not text).
+    return {
+      messageId,
+      senderOpenId,
+      text: '',
+      attachments: [],
+      unsupportedType: messageType === '' ? 'unknown' : messageType,
+    };
+  }
+  const parsed = parseMessageBody(messageType, item.body?.content ?? '');
+  if (parsed === undefined) {
+    return unavailable(`the quoted ${messageType} message's body could not be parsed`);
+  }
+  return { messageId, senderOpenId, text: parsed.text, attachments: parsed.attachments };
 }
 
 /**
@@ -340,7 +433,7 @@ export class LarkTransport implements FeishuTransport {
     this.dispatcher.register({
       'im.message.receive_v1': (data) => {
         const message = normalizeMessageEvent(data as RawMessageEvent);
-        if (message !== undefined) this.handler?.(message);
+        if (message !== undefined) void this.deliverInbound(message);
         return undefined;
       },
       'card.action.trigger': (data: RawCardActionEvent) => {
@@ -360,6 +453,59 @@ export class LarkTransport implements FeishuTransport {
     void this.resolveBotOpenId().catch((error: unknown) => {
       this.logger?.warn(`bot open id resolution failed: ${String(error)}`);
     });
+  }
+
+  /**
+   * Deliver one normalized inbound message to the surface.
+   *
+   * A reply/quote is resolved FIRST: the event carries only the parent's id,
+   * so the quoted body needs a second read — and the user's quoted content is
+   * part of the request, so it must be in hand before the turn starts. A
+   * plain message is handed over synchronously (no await), so bursts of bare
+   * attachment messages keep their arrival order.
+   * @param message - the normalized inbound message.
+   */
+  private async deliverInbound(message: FeishuMessage): Promise<void> {
+    const parentId = message.quotedMessageId;
+    if (parentId === undefined) {
+      this.handler?.(message);
+      return;
+    }
+    const quoted = await this.resolveQuotedMessage(parentId);
+    this.handler?.({ ...message, quoted });
+  }
+
+  /**
+   * Read a reply/quote's parent message into agent-visible content
+   * (`im.v1.message.get`). Never throws: an unreadable quote degrades to
+   * `unavailable` with its reason, so the agent learns there WAS a quote
+   * instead of the quote vanishing.
+   * @param messageId - the quoted (parent) message's id.
+   * @returns the quoted content, or the failure reason.
+   */
+  private async resolveQuotedMessage(messageId: string): Promise<QuotedMessage> {
+    try {
+      const response = await this.client.im.v1.message.get({
+        path: { message_id: messageId },
+        params: { user_id_type: 'open_id' },
+      });
+      this.assertOk(response, 'im.v1.message.get');
+      const quoted = normalizeQuotedMessage(response, messageId);
+      const summary =
+        quoted.unavailable ??
+        `${quoted.text.length} chars, ${quoted.attachments.length} attachment(s)`;
+      this.logger?.debug(`quoted message ${messageId} resolved: ${summary}`);
+      return quoted;
+    } catch (error: unknown) {
+      this.logger?.warn(`quoted message ${messageId} read failed: ${String(error)}`);
+      return {
+        messageId,
+        senderOpenId: '',
+        text: '',
+        attachments: [],
+        unavailable: String(error),
+      };
+    }
   }
 
   /**

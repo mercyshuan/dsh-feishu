@@ -109,6 +109,14 @@ The harness sandbox (and this checkout's environment) has specific rules:
   `POST accounts.feishu.cn/accounts/qrlogin/init` without them fails with
   4401 "请求无效" — a body like `{"unit":"eu_nc"}` is a red herring. Send
   `x-locale: zh-CN` + `x-terminal-type: 2`.
+- **A reply carries only the parent's id — and the message-resource endpoint
+  is keyed by the OWNING message.** `im.message.receive_v1` sets `parent_id`
+  with no body, so a quoted message needs a second read
+  (`im.v1.message.get`; the existing `im:message` scope covers it). When the
+  quoted message carried media, download it with the QUOTED message's id
+  (`/messages/{message_id}/resources/{key}?type=…`) — the reply's id
+  addresses the reply's own resource set. A quoted `interactive` message's
+  body is Feishu card JSON, not text: report the TYPE, never forward the body.
 
 ## Gemini / modlens
 

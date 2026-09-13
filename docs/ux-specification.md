@@ -830,8 +830,10 @@ markdown card (like the approval/question notices), posted before
 **Trigger** — an inbound message whose `text` is empty AND that carries at
 least one attachment (a bare `file` or `image` message; `video` and
 rich-text `post` support land in the sibling inbound-rich-text feature and
-reuse this pending path). Such a message is *registered* (pending) instead
-of delivered: the attachment is downloaded and saved to the workspace
+reuse this pending path). A message that replies to / quotes an earlier
+message is EXCLUDED — a quote is itself an instruction and starts its own turn
+(the sibling inbound-quotes part). Such a message is *registered* (pending)
+instead of delivered: the attachment is downloaded and saved to the workspace
 exactly as today, a NEW receipt card posts (the previous ones are kept —
 each file gets its own card, traceable in chat history), and NO turn starts.
 
@@ -950,6 +952,129 @@ cards stay in chat history. No panel views.
   the pending download path reuses the existing file seam for all of them.
 - post / video support is the sibling PR-A (inbound-rich-text), which drains
   into this pending path.
+
+## Part: inbound-quotes
+
+> A reply/quote is part of the request. When the user replies to an earlier
+> Feishu message, that message's content (its text, and its media as a saved
+> file path) is injected into the turn BEFORE the user's own text — the agent
+> finally sees WHAT is being replied to, without the user re-pasting it.
+
+### Intended behavior
+
+**Trigger** — an `im.message.receive_v1` event whose `parent_id` is set (the
+user replied to / quoted an earlier message, in a p2p chat or a group). Feishu
+ships ONLY the parent's id in the event — the body needs a second read — so a
+quote is a two-step pipeline whose API half belongs to the transport.
+
+**Resolution (transport)** — `normalizeMessageEvent` records the parent id as
+`FeishuMessage.quotedMessageId` (still a pure function: no I/O). The transport
+then hydrates `FeishuMessage.quoted` BEFORE handing the message to the bridge:
+
+| Step | Call | Result |
+|---|---|---|
+| Read | `im.v1.message.get` (`/open-apis/im/v1/messages/{message_id}`, `user_id_type=open_id`) | the parent item: `msg_type`, `body.content`, `sender.id` |
+| Parse | `parseMessageBody` — the SAME parser as live inbound messages | `text` + ordered `attachments` (a quoted `post` keeps its `<image N>` placeholders) |
+| Non-text type | known-but-unhandled `msg_type` (interactive card, sticker, folder, …) | `unsupportedType`: the TYPE is reported, the raw body never is (a card's JSON is not text) |
+| Failure | recalled (`deleted`), empty `items`, API error (scope / not found), unparseable body | `unavailable` carrying the reason |
+
+Failure is DATA, not an exception: once `quotedMessageId` exists, the delivered
+message ALWAYS carries `quoted`. A quote is explicit user intent, so it must
+reach the agent as "there was a quote I could not read — ask the user to resend
+it" instead of vanishing (repo rule: misconfiguration fails loud).
+
+Feishu scopes: the existing `im:message` scope covers the message read —
+`src/setup/feishu-manifest.json` is unchanged.
+
+**Delivery (bridge)** — `inboundContent` builds the quote's blocks FIRST, then
+the user's own text/attachments:
+
+| Position | Block |
+|---|---|
+| 1 | one text block wrapping the quote: header `[The user replied to an earlier message from <sender> (<id>) — its content follows]`, the quoted text, one note per quoted attachment, footer `[End of the replied-to message]` |
+| 2 | the user's own text (unchanged) |
+| 3 | the user's own attachments (unchanged) |
+
+The header/footer exist so the agent can never mistake the quoted body for the
+user's own words. Quoted media is downloaded through the message-resource
+endpoint keyed by the QUOTED message's id (the resource endpoint is keyed by the
+owning message, not the reply) and saved through the existing inbound seam, then
+named by REAL path in the quote block: `[quoted file: <name> — saved at <path>.
+You can read it with your file tools.]`
+
+**No receipt card for quoted media** — the `📎 File received` receipt belongs to
+a file the user sends NOW (inbound-attachments / inbound-wait-instruction). A
+quote re-reads something sent earlier; posting a receipt per quote would spam
+the chat, so the quoted attachment contributes its path note only. A download
+failure degrades to a loud note in the quote block
+(`[quoted file: <name> — download failed, the content is not available]`).
+
+**A reply is an instruction, not a pending attachment** — a message that
+carries attachments and NO text normally registers as pending
+(inbound-wait-instruction) and waits for the user's follow-up. A quoted message
+is the exception: quoting an earlier message IS the instruction ("about THAT,
+look at this"), so it starts its own turn and the quote is injected into it.
+
+**Group mention gate** — unchanged: a reply is gated exactly like any other
+message (group text still must @ the bot, or the solo relaxation applies). A
+quote never bypasses the gate.
+
+**States & transitions** — no new state machine: the quote is resolved
+per-message (stateless) and folded into the existing turn pipeline.
+
+| From | Event | To | Side effects |
+|---|---|---|---|
+| — | reply with text | turn runs | quote blocks + user text in one user message |
+| — | reply whose parent is a rich-text post | turn runs | quoted text with `<image N>` placeholders + quoted attachments saved by path |
+| — | reply whose parent is unreadable | turn runs | quote block naming the reason; user text unaffected |
+| — | reply whose parent is a card/sticker | turn runs | quote block naming the type only |
+| — | reply with attachments and NO text | turn runs (NOT pending) | quote block + the new attachments saved (their receipt cards post normally) |
+
+**Failure modes**:
+- `im.v1.message.get` fails (missing scope, rate limit, parent outside the
+  bot's visibility): loud `warn` + `unavailable` in the quote block; the turn
+  still runs — a quote never wedges the chat.
+- Parent recalled: `deleted` → `unavailable` ('the quoted message was
+  recalled').
+- Quoted attachment download/save fails: loud log + the degraded path note
+  inside the quote block; the user's own turn is unaffected.
+- A quote returned inside a queued message (a turn was already running): the
+  quote is resolved when the message is queued, so the queued turn keeps it.
+- A quote inside a slash command (`/help` as a reply): ignored — commands act
+  on the command line, not on quoted context.
+
+**Acceptance checklist**:
+- [ ] A reply to a text message injects the quoted text + sender id into the
+      turn, BEFORE the user's own text (unit)
+- [ ] The quoted message's rich-text post keeps ordered placeholders and
+      attachments (unit)
+- [ ] A quoted image/file is saved through the inbound seam and named by REAL
+      path in the quote block, with NO `📎 File received` receipt card (unit)
+- [ ] A quoted attachment whose download fails degrades to a loud note (unit)
+- [ ] An unreadable quote (recalled / API error / unparseable) reaches the
+      agent as an explicit "could not be read" block, never as silence (unit)
+- [ ] A quoted card (interactive) is reported by type (unit)
+- [ ] A quoted message with attachments and no text starts its own turn
+      instead of registering as pending (unit)
+- [ ] A plain message triggers NO extra Feishu API call (unit)
+- [ ] `normalizeMessageEvent` still normalizes plain messages to the exact
+      same shape (regression: `quotedMessageId` is absent, not `undefined`)
+- [ ] `im:message` scope reused — manifest unchanged (feishu-setup.md
+      description unchanged)
+
+### Reference
+
+- Feishu `im.message.receive_v1` carries `parent_id` (the replied-to message)
+  and `root_id` (the thread root) — the surface follows `parent_id`: it is the
+  message the user explicitly quoted.
+- `im.v1.message.get` (`GET /open-apis/im/v1/messages/{message_id}`) returns
+  `data.items[]` with `msg_type` / `body.content` / `sender.id` / `deleted`;
+  the existing `im:message` scope covers it.
+- botmux encodes the same intent differently (it forwards the reply's raw
+  parent id and leaves resolution to the reader) — resolving the body in the
+  transport is what makes the quote usable by the agent.
+- `parseMessageBody` is shared with the live inbound path on purpose: a quoted
+  `post` must speak the same placeholder/attachment vocabulary as a live one.
 
 ## Part: inbound-rich-text
 
