@@ -2735,20 +2735,22 @@ describe('panel command palette', () => {
           ? el.actions.filter((a) => a.tag === 'button').map((a) => a.text.content)
           : [],
       ) ?? [];
-    // Page 1 is the AGENT group — the commands that choose HOW the session
-    // runs come first, so the agent preset (with the model/permission/plan
-    // pickers) is reachable without a page flip.
+    // Page 1 carries the whole AGENT group (the commands that choose HOW the
+    // session runs) TOGETHER WITH the session and chat groups — one page, so
+    // the agent preset is visible without a page flip.
     expect(labels).toContain('🤖 Model');
     expect(labels).toContain('🔐 Permission');
     expect(labels).toContain('🧩 Agent preset');
     expect(labels).toContain('🗺️ Plan mode');
+    expect(labels).toContain('🗂️ Sessions');
+    expect(labels).toContain('➕ New chat');
     // /clear is the same action as /new and stays slash-only (one panel
     // button, user report) — its button is hidden.
     expect(labels).not.toContain('✨ Fresh start');
     // Resume lives inside the Sessions flow; a standalone button is
     // redundant (user report).
     expect(labels).not.toContain('↩️ Resume session');
-    // Page 2 holds the session + chat groups.
+    // Page 2 holds the system group (help/status + the dsh web wrappers).
     await h.bridge.handleCardAction({
       messageId: lastCardId(h),
       chatId: 'oc_chat',
@@ -2762,25 +2764,9 @@ describe('panel command palette', () => {
           ? el.actions.filter((a) => a.tag === 'button').map((a) => a.text.content)
           : [],
       ) ?? [];
-    expect(labels2).toContain('🗂️ Sessions');
-    expect(labels2).toContain('➕ New chat');
-    // Page 3 holds the system group (help/status + the dsh web wrappers).
-    await h.bridge.handleCardAction({
-      messageId: lastCardId(h),
-      chatId: 'oc_chat',
-      operatorOpenId: 'ou_user',
-      value: { kind: 'panel-page', page: '2' },
-    });
-    const panel3 = h.transport.updatedCards.at(-1);
-    const labels3 =
-      panel3?.elements.flatMap((el) =>
-        el.tag === 'action'
-          ? el.actions.filter((a) => a.tag === 'button').map((a) => a.text.content)
-          : [],
-      ) ?? [];
-    expect(labels3).toContain('📤 Export');
-    expect(labels3).toContain('🎯 Goal');
-    expect(labels3).toContain('🧹 Compact');
+    expect(labels2).toContain('📤 Export');
+    expect(labels2).toContain('🎯 Goal');
+    expect(labels2).toContain('🧹 Compact');
     // /panel is reachable as a slash line but its palette button is hidden —
     // a palette button that opens the panel would be the panel launching
     // itself (user report).
@@ -2806,7 +2792,7 @@ describe('panel command palette', () => {
     expect(
       panel?.elements.some(
         (el) =>
-          el.tag === 'note' && 'elements' in el && el.elements[0]?.content.includes('page 1/3'),
+          el.tag === 'note' && 'elements' in el && el.elements[0]?.content.includes('page 1/2'),
       ),
     ).toBe(true);
     const navLabels = (card: CardJson | undefined): string[] =>
@@ -2832,25 +2818,10 @@ describe('panel command palette', () => {
     expect(
       panel2?.elements.some(
         (el) =>
-          el.tag === 'note' && 'elements' in el && el.elements[0]?.content.includes('page 2/3'),
+          el.tag === 'note' && 'elements' in el && el.elements[0]?.content.includes('page 2/2'),
       ),
     ).toBe(true);
-    expect(navLabels(panel2)).toContain('◀️ Prev');
-    expect(navLabels(panel2)).toContain('Next ▶️');
-    await h.bridge.handleCardAction({
-      messageId: lastCardId(h),
-      chatId: 'oc_chat',
-      operatorOpenId: 'ou_user',
-      value: { kind: 'panel-page', page: '2' },
-    });
-    const panel3 = h.transport.updatedCards.at(-1);
-    expect(
-      panel3?.elements.some(
-        (el) =>
-          el.tag === 'note' && 'elements' in el && el.elements[0]?.content.includes('page 3/3'),
-      ),
-    ).toBe(true);
-    expect(navLabels(panel3)).toEqual(['◀️ Prev']);
+    expect(navLabels(panel2)).toEqual(['◀️ Prev']);
   });
 
   it('panel-page clamps out-of-range pages and ignores non-numeric ones', async () => {
@@ -2903,7 +2874,7 @@ describe('panel command palette', () => {
     expect(
       updated?.elements.some(
         (el) =>
-          el.tag === 'note' && 'elements' in el && el.elements[0]?.content.includes('page 2/3'),
+          el.tag === 'note' && 'elements' in el && el.elements[0]?.content.includes('page 2/2'),
       ),
     ).toBe(true);
     expect(h.transport.sentCards).toHaveLength(1);
@@ -2917,14 +2888,13 @@ describe('panel command palette', () => {
       operatorOpenId: 'ou_user',
       value: { kind: 'panel' },
     });
-    for (const page of ['1', '2']) {
-      await h.bridge.handleCardAction({
-        messageId: lastCardId(h),
-        chatId: 'oc_chat',
-        operatorOpenId: 'ou_user',
-        value: { kind: 'panel-page', page },
-      });
-    }
+    // The system group (help among them) lives on page 2 — one flip.
+    await h.bridge.handleCardAction({
+      messageId: lastCardId(h),
+      chatId: 'oc_chat',
+      operatorOpenId: 'ou_user',
+      value: { kind: 'panel-page', page: '1' },
+    });
     // help/status/plan are direct-result commands: no input/confirm/picker
     // sub-view. The state-machine completion exit MUST patch the panel card
     // back to the menu root — that patch is what stops Lark from restoring
@@ -2940,7 +2910,7 @@ describe('panel command palette', () => {
     expect(
       afterHelp?.elements.some(
         (el) =>
-          el.tag === 'note' && 'elements' in el && el.elements[0]?.content.includes('page 3/3'),
+          el.tag === 'note' && 'elements' in el && el.elements[0]?.content.includes('page 2/2'),
       ),
     ).toBe(true);
     // The panel card itself was never re-posted — only the inert result card

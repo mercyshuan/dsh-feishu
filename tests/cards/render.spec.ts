@@ -674,9 +674,14 @@ describe('panelPages', () => {
   it('packs whole category blocks and never splits one across pages', () => {
     const pages = panelPages(paletteCommands);
     const buttonCounts = pages.map((page) => page.filter((e) => e.type === 'button').length);
-    // session(7) + chat(1) fit page 1; the whole system block stays on
-    // page 2 (categories are never torn across pages).
-    expect(buttonCounts).toEqual([PANEL_PAGE_SIZE, 7]);
+    // session(7) + chat(1) fit page 1; the whole system block moves to page 2
+    // as one piece (categories are never torn across pages). Page 1 holds 8
+    // here because the fixture has no agent group — with the shipped command
+    // set it is the full PANEL_PAGE_SIZE (agent + session + chat).
+    expect(buttonCounts).toEqual([8, 7]);
+    // No page ever exceeds the capacity (page 1 is simply not full with this
+    // fixture: it has no agent group, and a category block is never split).
+    expect(Math.max(...buttonCounts)).toBeLessThanOrEqual(PANEL_PAGE_SIZE);
   });
 
   it('a category larger than the page size keeps its own page (no split)', () => {
