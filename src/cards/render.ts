@@ -818,6 +818,7 @@ export function panelPages(
 function categoryLabel(category: string): string {
   // Known categories come from the catalog; an unknown id keeps the
   // capitalized fallback so a future category still renders labeled.
+  if (category === 'agent') return t('panel.category.agent');
   if (category === 'session') return t('panel.category.session');
   if (category === 'chat') return t('panel.category.chat');
   if (category === 'system') return t('panel.category.system');

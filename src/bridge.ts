@@ -1209,10 +1209,11 @@ export class Bridge {
   }
 
   /** The panel command palette: every surface command as a button, grouped
-   *  by category (session → chat → system) so the palette reads as sections
-   *  regardless of registration order. */
+   *  by category (agent → session → chat → system) so the palette reads as
+   *  sections regardless of registration order, and the group that chooses
+   *  HOW the session runs lands on the first page. */
   private panelCommands(): PanelCommand[] {
-    const categoryOrder = ['session', 'chat', 'system'];
+    const categoryOrder = ['agent', 'session', 'chat', 'system'];
     return [...this.commands.list()]
       .filter((command) => command.hiddenFromPanel !== true)
       .sort((a, b) => categoryOrder.indexOf(a.category) - categoryOrder.indexOf(b.category))

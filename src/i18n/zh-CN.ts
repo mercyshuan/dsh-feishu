@@ -192,6 +192,7 @@ export const zhMessages: Record<MessageKey, string> = {
   'panel.model.noneConfigured': '当前部署没有可用模型 —— 使用 /model <provider>/<model> 设置一个。',
   'panel.model.noneSelected': '尚未选择模型。',
   'panel.model.intro': '**选择模型** —— 选择会立即切换当前会话的模型，并保存为新会话的默认值。',
+  'panel.category.agent': '🤖 智能体',
   'panel.category.session': '🧩 会话',
   'panel.category.chat': '💬 聊天',
   'panel.category.system': '⚙️ 系统',
