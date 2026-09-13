@@ -28,7 +28,7 @@ export type PanelView =
   | { readonly kind: 'session-detail'; readonly sessionId: string }
   | {
       readonly kind: 'picker';
-      readonly picker: 'repo' | 'model' | 'permission';
+      readonly picker: 'repo' | 'model' | 'permission' | 'agent-preset';
       readonly page: number;
       /** Custom repo roots to scan (a typed `/repo <path>` passes one root);
        *  omit to use the deployment's default `repoRoots`. */

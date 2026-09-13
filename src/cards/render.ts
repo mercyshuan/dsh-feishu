@@ -140,6 +140,9 @@ export type SurfaceAction =
   // `preset` is optional: the dropdown stamps the marker only (the choice
   // arrives in the callback's `option`); the legacy button carried it.
   | { readonly kind: 'permission-pick'; readonly preset?: string }
+  // `id` is optional for the same dropdown-marker reason (the choice arrives
+  // in the callback's `option`).
+  | { readonly kind: 'agent-preset-pick'; readonly id?: string }
   // `selection` is optional for the same dropdown-marker reason.
   | { readonly kind: 'model-pick'; readonly selection?: string }
   | { readonly kind: 'model-page'; readonly page: string }
@@ -1188,6 +1191,103 @@ export function buildPermissionPickerCard(presets: readonly PermissionPresetView
     config: { wide_screen_mode: true },
     header: {
       title: { tag: 'plain_text', content: t('panel.permission.title') },
+      template: 'wathet',
+    },
+    elements,
+  };
+}
+
+/** One agent-preset option as the picker renders it. */
+export interface AgentPresetView {
+  /** The preset id (a directory name under one of the preset roots). */
+  readonly id: string;
+  /** Human label (the preset's display name, falling back to the id). */
+  readonly label: string;
+  /** One user-facing sentence from the preset's metadata, or `undefined`. */
+  readonly description: string | undefined;
+  /** Whether this is the preset the chat's agent composes from. */
+  readonly current: boolean;
+  /** Why the preset cannot be composed (present = broken). */
+  readonly broken?: string;
+}
+
+/**
+ * Build the agent-preset picker card: the roster as one single-choice
+ * dropdown, the chat's current preset preselected. Choosing one composes the
+ * chat's session from that preset — immediately while the session is still
+ * blank, otherwise for the chat's NEXT session (the harness fixes a session's
+ * preset once a turn has run, and a mid-history swap would strand the tool
+ * calls the log already recorded).
+ * @param presets - the roster, declaration order.
+ * @returns Feishu interactive card JSON (v1 layout).
+ */
+export function buildAgentPresetPickerCard(presets: readonly AgentPresetView[]): CardJson {
+  const elements: CardElement[] = [
+    {
+      tag: 'markdown',
+      content: t('panel.agentPreset.intro'),
+    },
+    { tag: 'hr' },
+  ];
+  const current = presets.find((preset) => preset.current);
+  if (presets.length === 0) {
+    elements.push({ tag: 'markdown', content: t('panel.agentPreset.noneConfigured') });
+    return {
+      config: { wide_screen_mode: true },
+      header: {
+        title: { tag: 'plain_text', content: t('panel.agentPreset.title') },
+        template: 'wathet',
+      },
+      elements,
+    };
+  }
+  const currentId = current?.id;
+  const optionIds = new Set(presets.map((preset) => preset.id));
+  const canPreselect = currentId !== undefined && optionIds.has(currentId);
+  elements.push({
+    tag: 'action',
+    actions: [
+      {
+        tag: 'select_static',
+        placeholder: { tag: 'plain_text', content: t('panel.agentPreset.placeholder') },
+        ...(canPreselect ? { initial_option: currentId } : {}),
+        options: presets.map((preset) => ({
+          // A broken preset stays visible (it explains itself) but is marked,
+          // so a failure is discovered in the picker instead of at turn time.
+          text: {
+            tag: 'plain_text',
+            content:
+              preset.broken === undefined ? preset.label : `${preset.label} ${t('panel.agentPreset.brokenMark')}`,
+          },
+          value: preset.id,
+        })),
+        value: actionValue({ kind: 'agent-preset-pick' }),
+      },
+    ],
+  });
+  elements.push({
+    tag: 'note',
+    elements: [
+      {
+        tag: 'plain_text',
+        content:
+          current === undefined
+            ? t('panel.agentPreset.noneSelected')
+            : t('card.currentNote', { label: current.label }),
+      },
+    ],
+  });
+  if (current !== undefined && current.description !== undefined) {
+    elements.push({ tag: 'markdown', content: current.description });
+  }
+  elements.push({
+    tag: 'note',
+    elements: [{ tag: 'plain_text', content: t('panel.agentPreset.hint') }],
+  });
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: 'plain_text', content: t('panel.agentPreset.title') },
       template: 'wathet',
     },
     elements,

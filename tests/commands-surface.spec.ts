@@ -96,6 +96,11 @@ function makeCommands(overrides: Partial<SurfaceCommandHost> = {}): {
     executeCommand: undefined,
     readSession: undefined,
     permissionPresets: undefined,
+    agentPresets: undefined,
+    applyAgentPreset: async (_chatId, agentPreset) => ({
+      kind: 'success',
+      text: `preset ${agentPreset}`,
+    }),
     planMode: undefined,
     agentDefaultModel: undefined,
     llm: undefined,

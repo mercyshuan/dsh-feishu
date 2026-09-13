@@ -179,6 +179,14 @@ export const zhMessages: Record<MessageKey, string> = {
   'panel.permission.noneSelected': '尚未选择预设。',
   'panel.permission.serviceUnavailable': '权限预设在此部署上不可用。',
   'panel.permission.intro': '**选择权限预设** —— 决定该聊天会话的沙箱模式与审批策略。',
+  'panel.agentPreset.title': '🧩 智能体预设',
+  'panel.agentPreset.placeholder': '选择一个智能体预设…',
+  'panel.agentPreset.noneConfigured': '该部署未配置任何智能体预设。',
+  'panel.agentPreset.noneSelected': '尚未选择智能体预设。',
+  'panel.agentPreset.serviceUnavailable': '该部署不可用智能体预设 —— 会话按宿主挂载组装。',
+  'panel.agentPreset.intro': '**选择智能体预设** —— 决定该聊天会话可用的工具、人设与技能。',
+  'panel.agentPreset.brokenMark': '⚠️ 不可用',
+  'panel.agentPreset.hint': '空白会话立即生效；已开始的会话在下一个新会话（/new）生效。',
   'panel.model.title': '🤖 模型',
   'panel.model.placeholder': '请选择模型…',
   'panel.model.noneConfigured': '当前部署没有可用模型 —— 使用 /model <provider>/<model> 设置一个。',
@@ -249,6 +257,7 @@ export const zhMessages: Record<MessageKey, string> = {
   'command.cmd.clear.label': '✨ 新对话',
   'command.cmd.new.label': '➕ 新聊天',
   'command.cmd.permission.label': '🔐 权限',
+  'command.cmd.preset.label': '🧩 智能体预设',
   'command.cmd.compact.label': '🧹 压缩',
   'command.cmd.plan.label': '🗺️ 计划模式',
   'command.cmd.goal.label': '🎯 目标',
@@ -279,6 +288,7 @@ export const zhMessages: Record<MessageKey, string> = {
   'command.help.compact': '压缩较早的对话历史',
   'command.help.feedback': '发送反馈',
   'command.help.permission': '切换权限预设 —— 沙箱模式 + 审批策略',
+  'command.help.preset': '切换该聊天的会话采用的智能体预设',
   'command.help.plan': '进入或退出计划模式（不带参数切换；/plan on|off 显式设置）',
 
   // ── /status 文本报告（status 命令的文本输出）──────────────────────────
@@ -330,6 +340,9 @@ export const zhMessages: Record<MessageKey, string> = {
   'panel.action.renameFailed': '重命名失败：{message}',
   'panel.action.archiveFailed': '归档失败：{message}',
   'panel.action.permissionSwitchFailed': '无法切换到预设 {preset}：{detail}',
+  'panel.action.agentPresetUnavailable': '该部署不可用智能体预设 —— 未挂载 agent-presets 行。',
+  'panel.action.agentPresetSwitchFailed': '无法切换到智能体预设 {preset}：{detail}',
+  'panel.action.agentPresetPickInvalid': '未选择智能体预设。',
 
   // ── 权限预设显示名（服务暴露的是原始 id）───────────────────────────────
   'preset.readOnly': '只读',
@@ -366,6 +379,11 @@ export const zhMessages: Record<MessageKey, string> = {
   'command.info.groupCreated': '群组已创建：{name}（{chatId}）',
   'command.info.modelSet': '模型已设为 {selection}（当前会话 + 默认值）。',
   'command.info.permissionSwitched': '权限预设已切换为 {preset}。',
+  'command.info.agentPresetSwitched': '智能体预设已切换为 {preset}。',
+  'command.info.agentPresetNextSession':
+    '智能体预设 {preset} 将在下一个新会话（/new）生效 —— 当前会话的预设已固定。',
+  'command.info.agentPresetPending': '智能体预设 {preset} 将在下一个新会话生效。',
+  'command.info.agentPresetUnchanged': '智能体预设已经是 {preset}。',
   'command.info.cwdSetRestart': '工作目录已设为 {path}（下一条消息将重启会话）。',
   'command.info.planOn': '计划模式已开启。使用 /plan off 关闭。',
   'command.info.planOff': '计划模式已关闭。',

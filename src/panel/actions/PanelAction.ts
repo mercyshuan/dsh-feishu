@@ -12,6 +12,7 @@
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type {
   AgentDefaultModelService,
+  AgentPresetsService,
   LlmService,
   ModelSelectionView,
   PermissionPresetService,
@@ -57,6 +58,7 @@ export interface PanelServices {
         | undefined)
     | undefined;
   readonly permissionPresets: PermissionPresetService | undefined;
+  readonly agentPresets: AgentPresetsService | undefined;
   readonly planMode: PlanModeService | undefined;
   readonly agentDefaultModel: AgentDefaultModelService | undefined;
   readonly llm: LlmService | undefined;
@@ -105,6 +107,9 @@ export interface PanelActionContext {
   findCommand(name: string): SurfaceCommand | undefined;
   /** Business helpers the actions delegate to (Bridge implements). */
   ensureAgent(chatId: string): Promise<Agent>;
+  /** Apply an agent-preset pick: remember it for the chat's next session and
+   *  re-compose a still-blank live agent onto it right away. */
+  applyAgentPreset(chatId: string, agentPreset: string): Promise<CommandResult>;
   liveAgent(chatId: string): Agent | undefined;
   resumeSession(chatId: string, sessionId: string, cwd?: string): Promise<CommandResult>;
   exportSessionLog(chatId: string, sessionId: string): Promise<CommandResult>;

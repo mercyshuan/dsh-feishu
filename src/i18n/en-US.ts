@@ -186,6 +186,17 @@ export const enMessages = {
   'panel.permission.serviceUnavailable': 'Permission presets are unavailable on this deployment.',
   'panel.permission.intro':
     '**Choose a permission preset** — sandbox mode + approval policy for this chat’s session.',
+  'panel.agentPreset.title': '🧩 Agent preset',
+  'panel.agentPreset.placeholder': 'Choose an agent preset…',
+  'panel.agentPreset.noneConfigured': 'No agent presets configured on this deployment.',
+  'panel.agentPreset.noneSelected': 'No agent preset selected yet.',
+  'panel.agentPreset.serviceUnavailable':
+    'Agent presets are unavailable on this deployment — sessions compose from the host mounts.',
+  'panel.agentPreset.intro':
+    '**Choose an agent preset** — the tools, persona, and skills this chat’s session runs with.',
+  'panel.agentPreset.brokenMark': '⚠️ unusable',
+  'panel.agentPreset.hint':
+    'Applies now to a blank session, otherwise to this chat’s next session (/new).',
   'panel.model.title': '🤖 Model',
   'panel.model.placeholder': 'Choose a model…',
   'panel.model.noneConfigured':
@@ -259,6 +270,7 @@ export const enMessages = {
   'command.cmd.clear.label': '✨ Fresh start',
   'command.cmd.new.label': '➕ New chat',
   'command.cmd.permission.label': '🔐 Permission',
+  'command.cmd.preset.label': '🧩 Agent preset',
   'command.cmd.compact.label': '🧹 Compact',
   'command.cmd.plan.label': '🗺️ Plan mode',
   'command.cmd.goal.label': '🎯 Goal',
@@ -291,6 +303,7 @@ export const enMessages = {
   'command.help.compact': 'Compact older conversation history',
   'command.help.feedback': 'Send feedback',
   'command.help.permission': 'Switch the permission preset — sandbox mode + approval policy',
+  'command.help.preset': 'Switch the agent preset this chat composes sessions from',
   'command.help.plan': 'Enter or leave plan mode (bare toggles; /plan on|off sets it)',
 
   // ── /status text report (the `status` command's text output) ────────────
@@ -326,6 +339,12 @@ export const enMessages = {
   'command.info.groupCreated': 'Group created: {name} ({chatId})',
   'command.info.modelSet': 'Model set to {selection} (this session + default).',
   'command.info.permissionSwitched': 'Permission preset switched to {preset}.',
+  'command.info.agentPresetSwitched': 'Agent preset switched to {preset}.',
+  'command.info.agentPresetNextSession':
+    'Agent preset {preset} applies from this chat’s next session (/new) — the current one is already fixed.',
+  'command.info.agentPresetPending':
+    'Agent preset {preset} applies from this chat’s next session.',
+  'command.info.agentPresetUnchanged': 'Agent preset is already {preset}.',
   'command.info.cwdSetRestart':
     'Working directory set to {path} (session restarts on your next message).',
   'command.info.planOn': 'Plan mode on. Use /plan off to leave.',
@@ -375,6 +394,11 @@ export const enMessages = {
   'panel.action.renameFailed': 'Rename failed: {message}',
   'panel.action.archiveFailed': 'Archiving failed: {message}',
   'panel.action.permissionSwitchFailed': 'could not switch to preset {preset}: {detail}',
+  'panel.action.agentPresetUnavailable':
+    'agent presets are unavailable on this deployment — the agent-presets row is not mounted.',
+  'panel.action.agentPresetSwitchFailed':
+    'could not switch to agent preset {preset}: {detail}',
+  'panel.action.agentPresetPickInvalid': 'No agent preset was chosen.',
 
   // ── Permission preset display names (the service exposes raw ids) ───────
   'preset.readOnly': 'read-only',

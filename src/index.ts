@@ -34,6 +34,7 @@ import z from '@deepseek-ai/schemastery';
 import { pickAttachmentFileName } from './attachment-naming.js';
 import {
   type AgentDefaultModelService,
+  type AgentPresetsService,
   type AgentStore,
   type ApprovalRequestLike,
   type AskQuestionsRequestLike,
@@ -234,7 +235,7 @@ type SessionQueryLike = {
     }[]
   >;
   readSession(sessionId: unknown): Promise<{
-    readonly session: { readonly id: unknown };
+    readonly session: { readonly id: unknown; readonly agentPreset?: string };
     readonly events: readonly SessionExportEvent[];
   }>;
   readTitleSnapshots(
@@ -247,6 +248,27 @@ type SessionQueryLike = {
       readonly value: { readonly title?: { readonly title?: string } };
     }[]
   >;
+};
+
+/**
+ * Structural subset of `ctx.agentPresets` used only to COMPOSE an agent from a
+ * chosen preset. Kept local so the plugin compiles without a dependency on the
+ * package.
+ *
+ * The important half of the contract: the harness runtime RECORDS
+ * `meta.agentPreset` on the session header but does NOT apply it — the surface
+ * must call `mount` inside the agent-factory `setup`, which is exactly what
+ * this seam does, and only the surface can do it.
+ */
+type AgentPresetsLike = {
+  /** Resolve one preset id (`undefined` = the configured default). */
+  resolve(id?: string): Promise<{ readonly id: string }>;
+  /**
+   * Compose one agent from a preset: ensure the preset's standing mount and
+   * parent the agent's scope key to it. A broken preset rejects, rolling the
+   * agent creation back rather than starting a half-composed agent.
+   */
+  mount(agentCtx: Context, id?: string): Promise<{ readonly id: string }>;
 };
 
 /** Resolve the user allowlist: config first, then the `FEISHU_ALLOWED_USERS`
@@ -416,6 +438,75 @@ async function listSessions(ctx: Context): Promise<readonly SessionListRow[] | u
   }));
 }
 
+/**
+ * Read a session's durable agent preset from its header, or `undefined` when
+ * the header carries none (a session created before the roster was mounted, or
+ * by another surface). A resumed session keeps the composition it ran with:
+ * the harness fixes an agent's preset once a turn has run, and re-composing an
+ * old session onto today's default would swap its tool set out from under the
+ * tool calls the log already recorded.
+ * @param ctx - plugin context.
+ * @param sessionId - the persisted session id.
+ * @returns the preset id the session recorded, or `undefined`.
+ */
+async function readDurableAgentPreset(
+  ctx: Context,
+  sessionId: string,
+): Promise<string | undefined> {
+  const sessionQuery = ctx.get('sessionQuery') as SessionQueryLike | undefined;
+  if (sessionQuery === undefined) return undefined;
+  try {
+    const record = await sessionQuery.readSession(sessionId);
+    return record.session.agentPreset;
+  } catch (error: unknown) {
+    ctx.logger.warn(
+      `[feishu] reading the agent preset of session ${sessionId} failed: ${String(error)}`,
+    );
+    return undefined;
+  }
+}
+
+/**
+ * The preset a NEW session must compose from: the chat's explicit pick, else
+ * the deployment default (`agent-presets.default`, where the settings user
+ * layer wins). `undefined` when the roster is not mounted — the session then
+ * composes from the host mounts, exactly as before this feature existed.
+ * @param ctx - plugin context.
+ * @param requested - the chat's chosen preset id, or `undefined`.
+ * @returns a resolvable preset id, or `undefined`.
+ */
+async function resolvePresetToMount(
+  ctx: Context,
+  requested: string | undefined,
+): Promise<string | undefined> {
+  const presets = ctx.get('agentPresets') as AgentPresetsLike | undefined;
+  if (presets === undefined) return undefined;
+  try {
+    return (await presets.resolve(requested)).id;
+  } catch (error: unknown) {
+    ctx.logger.warn(
+      `[feishu] agent preset ${requested ?? '(default)'} is not usable: ${String(error)}`,
+    );
+    return undefined;
+  }
+}
+
+/**
+ * The agent-factory `setup` that composes one agent from a preset. `mount` is
+ * what actually APPLIES a preset (the header field only records it), and it
+ * rejects — rolling the creation back — when the preset is broken.
+ * @param ctx - plugin context.
+ * @param agentPreset - the resolved preset id.
+ * @returns the setup callback passed to `agents.create` / `agents.resume`.
+ */
+function presetSetup(ctx: Context, agentPreset: string): (agentCtx: Context) => Promise<void> {
+  return async (agentCtx: Context) => {
+    const presets = ctx.get('agentPresets') as AgentPresetsLike | undefined;
+    if (presets === undefined) return;
+    await presets.mount(agentCtx, agentPreset);
+  };
+}
+
 /** Injectable dependencies so `apply` is unit-testable without a network. */
 export interface ApplyDeps {
   /** Transport factory; defaults to the lark-oapi implementation. */
@@ -489,30 +580,41 @@ export function apply(ctx: Context, config: Config, deps: ApplyDeps = {}): void 
         throw new Error('agents service unavailable; cannot resume a session');
       }
       const resolved = resolveAgentOptions(ctx, config);
+      // A resumed session keeps the preset it recorded. A header without one
+      // means the session ran on the host mounts, so it resumes that way
+      // rather than being re-composed onto today's default mid-history.
+      const durablePreset = await readDurableAgentPreset(ctx, String(sessionId));
       logger.debug(
         `[feishu] agent options resume session=${String(sessionId)} ` +
-          `provider=${resolved?.provider ?? '(none)'} model=${resolved?.model ?? '(none)'}`,
+          `provider=${resolved?.provider ?? '(none)'} model=${resolved?.model ?? '(none)'} ` +
+          `agentPreset=${durablePreset ?? '(host)'}`,
       );
       const { agent } = await agents.resume({
         resumeSessionId: sessionId as unknown as SessionId,
         ...(resolved !== undefined ? { agentOptions: resolved } : {}),
+        ...(durablePreset !== undefined ? { setup: presetSetup(ctx, durablePreset) } : {}),
       });
       return agent;
     },
-    create: async (sessionId, cwd) => {
+    create: async (sessionId, cwd, agentPreset) => {
       const agents = ctx.get('agents');
       if (agents === undefined) {
         throw new Error('agents service unavailable; cannot create a session');
       }
       const resolved = resolveAgentOptions(ctx, config);
+      // The chat's pick, else the deployment default. `undefined` (no roster
+      // mounted) leaves the session on the host mounts, as before.
+      const preset = await resolvePresetToMount(ctx, agentPreset);
       logger.debug(
         `[feishu] agent options create session=${String(sessionId)} ` +
-          `provider=${resolved?.provider ?? '(none)'} model=${resolved?.model ?? '(none)'}`,
+          `provider=${resolved?.provider ?? '(none)'} model=${resolved?.model ?? '(none)'} ` +
+          `agentPreset=${preset ?? '(host)'}`,
       );
       const { agent } = await agents.create({
         sessionId: sessionId as unknown as SessionId,
-        meta: { cwd },
+        meta: { cwd, ...(preset !== undefined ? { agentPreset: preset } : {}) },
         ...(resolved !== undefined ? { agentOptions: resolved } : {}),
+        ...(preset !== undefined ? { setup: presetSetup(ctx, preset) } : {}),
       });
       // Attach the new session to the workspace owning `cwd` (dsh web parity),
       // creating the workspace record when the directory is not yet
@@ -619,6 +721,13 @@ export function apply(ctx: Context, config: Config, deps: ApplyDeps = {}): void 
     ...(ctx.get('agentDefaultModel') !== undefined
       ? { agentDefaultModel: ctx.get('agentDefaultModel') as AgentDefaultModelService }
       : {}),
+    // Agent-preset roster seam (this bundle's `agent-presets` row). Resolved
+    // LAZILY like workspaceRegistry: the row may still be activating when this
+    // plugin applies, and a startup snapshot would then be undefined forever.
+    // The roster only feeds the picker; composing an agent happens in
+    // `agentStore.create`/`resume` above (via `mount`), because the harness
+    // records `meta.agentPreset` WITHOUT applying it.
+    getAgentPresets: () => ctx.get('agentPresets') as AgentPresetsService | undefined,
     ...(ctx.get('llm') !== undefined ? { llm: ctx.get('llm') as LlmService } : {}),
   });
   logger.debug(
@@ -627,6 +736,7 @@ export function apply(ctx: Context, config: Config, deps: ApplyDeps = {}): void 
       `permissionPresets=${ctx.get('permissionPresets') !== undefined} ` +
       `planMode=${ctx.get('planMode') !== undefined} ` +
       `agentDefaultModel=${ctx.get('agentDefaultModel') !== undefined} ` +
+      `agentPresets=${ctx.get('agentPresets') !== undefined} ` +
       `llm=${ctx.get('llm') !== undefined} attachments=${ctx.get('attachments') !== undefined}`,
   );
   // Interactive approvals: answer every `approval/request` with a Feishu

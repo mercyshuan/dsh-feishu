@@ -6,6 +6,7 @@
 
 import { PanelViewRegistry } from './PanelViewState.js';
 import {
+  AgentPresetPickerViewState,
   ConfirmViewState,
   InputViewState,
   MenuViewState,
@@ -28,6 +29,7 @@ export function buildPanelViewRegistry(): PanelViewRegistry {
     new RepoPickerViewState(),
     new ModelPickerViewState(),
     new PermissionPickerViewState(),
+    new AgentPresetPickerViewState(),
   ]) {
     registry.register(state);
   }

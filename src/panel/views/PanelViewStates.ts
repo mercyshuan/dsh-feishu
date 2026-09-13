@@ -12,11 +12,13 @@
  */
 
 import {
+  buildAgentPresetPickerCard,
   buildConfirmCard,
   buildInputCard,
   buildModelPickerCard,
   buildPermissionPickerCard,
   buildRepoPickerCard,
+  type AgentPresetView,
   type PermissionPresetView,
 } from '../../cards/render.js';
 import { buildSessionDetailCard, buildSessionsCard } from '../../cards/session-list.js';
@@ -203,5 +205,49 @@ export class PermissionPickerViewState implements PanelViewState {
       };
     });
     return buildPermissionPickerCard(presets);
+  }
+}
+
+/** `picker:agent-preset` — the agent-preset picker (async: resolves the live
+ *  agent, the roster, and the chat's effective preset). */
+export class AgentPresetPickerViewState implements PanelViewState {
+  readonly key = 'picker:agent-preset';
+  readonly asyncData = true;
+  async render(ctx: PanelViewContext, chatId: string, _view: PanelView): Promise<CardJson> {
+    const service = ctx.agentPresets();
+    if (service === undefined) {
+      return {
+        config: { wide_screen_mode: true },
+        header: {
+          title: { tag: 'plain_text', content: t('command.cmd.preset.label') },
+          template: 'wathet',
+        },
+        elements: [
+          {
+            tag: 'markdown',
+            content: t('panel.agentPreset.serviceUnavailable'),
+          },
+        ],
+      };
+    }
+    // Ensure the chat has an agent: the picker's current value is the preset
+    // that agent was COMPOSED from (the roster's default id is only the
+    // fallback for an agent that was composed from nothing).
+    const agent = await ctx.ensureAgent(chatId);
+    const rows = await service.list();
+    const composed =
+      service.composedPreset === undefined ? undefined : service.composedPreset(agent.ctx);
+    const current =
+      composed ?? ctx.selectedAgentPreset(chatId) ?? rows.find((row) => row.isDefault)?.id;
+    const presets: AgentPresetView[] = rows.map((row) => ({
+      id: row.id,
+      label: row.name ?? row.id,
+      description: row.description,
+      current: row.id === current,
+      // exactOptionalPropertyTypes: a broken row carries the reason, a healthy
+      // one must not carry the key at all.
+      ...(row.broken !== undefined ? { broken: row.broken } : {}),
+    }));
+    return buildAgentPresetPickerCard(presets);
   }
 }
