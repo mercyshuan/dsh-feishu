@@ -102,6 +102,7 @@ const COMMAND_HELP_KEYS: Readonly<Record<string, MessageKey>> = {
   feedback: 'command.help.feedback',
   permission: 'command.help.permission',
   preset: 'command.help.preset',
+  effort: 'command.help.effort',
   plan: 'command.help.plan',
 };
 
@@ -163,6 +164,11 @@ export interface SurfaceCommandHost {
   pushPanel(chatId: string, view: PanelView): Promise<void>;
   /** Ensure a live agent exists for the chat (harness passthrough). */
   ensureAgent(chatId: string): Promise<Agent>;
+  /** Apply a model pick: switch the chat's session model AND the deployment
+   *  default, keeping the thinking depth when the new model offers it. */
+  applyModelPick(chatId: string, provider: string, model: string): Promise<CommandResult>;
+  /** Apply a thinking-depth (reasoning effort) pick for the current model. */
+  applyEffortPick(chatId: string, effort: string): Promise<CommandResult>;
   /** The shared /resume flow (slash line and /sessions Resume button). */
   resumeSession(chatId: string, sessionId: string, cwd?: string): Promise<CommandResult>;
   /** Whether a turn is running (the working-state gate). */
@@ -508,28 +514,44 @@ export function registerSurfaceCommands(commands: CommandRegistry, host: Surface
       }
       const parsed = parseModelArg(raw);
       if (!parsed.ok) return { kind: 'error', text: parsed.error };
-      const service = options.agentDefaultModel;
-      if (service === undefined) {
+      if (options.agentDefaultModel === undefined) {
         return {
           kind: 'error',
           text: t('command.error.modelSwitchUnavailable'),
         };
       }
-      await service.saveSelection(parsed.selection);
-      // (B) switch the CURRENT session immediately, not just the default for
-      // future sessions: couple the agent's model selection so the next turn
-      // assembles with the new provider/model (dsh web parity).
-      applySessionModelSwitch(
-        options.liveAgent(invocation.chatId)?.ctx,
-        parsed.selection,
-        options.logger,
+      // The host owns the pick: it saves the new default WITH a thinking depth
+      // the target model accepts (a raw `saveSelection` replaces the stored
+      // section, which silently dropped the chat's level) and switches the
+      // CURRENT session immediately, not just future ones.
+      return options.applyModelPick(
+        invocation.chatId,
+        parsed.selection.provider,
+        parsed.selection.model,
       );
-      return {
-        kind: 'success',
-        text: t('command.info.modelSet', {
-          selection: `${parsed.selection.provider} · ${parsed.selection.model}`,
-        }),
-      };
+    },
+  });
+  // /effort: the thinking depth (`reasoningEffort`) of the CURRENT model —
+  // `off` / `low` / `high` / `max` on the deepseek routes. A typed level
+  // applies straight away (validated against the model, since DSH never
+  // clamps); a bare /effort (or the panel button) opens the model card, which
+  // carries the depth dropdown next to the model one.
+  commands.register({
+    name: 'effort',
+    description: 'Set the thinking depth (reasoning effort) of the current model',
+    usage: '<off|low|high|max>',
+    category: 'agent',
+    buttonLabel: t('command.cmd.effort.label'),
+    handler: async (invocation) => {
+      if (options.isWorking(invocation.chatId)) {
+        return { kind: 'error', text: t('command.error.turnRunning') };
+      }
+      const raw = invocation.rawInput.trim();
+      if (raw === '') {
+        await options.pushPanel(invocation.chatId, { kind: 'picker', picker: 'model', page: 0 });
+        return { kind: 'success', text: '' };
+      }
+      return options.applyEffortPick(invocation.chatId, raw);
     },
   });
   commands.register({

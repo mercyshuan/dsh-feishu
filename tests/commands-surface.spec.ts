@@ -15,6 +15,7 @@ import {
 import { CommandRegistry, type CommandResult } from '../src/commands.js';
 import type { CardAction, CardJson, FeishuTransport } from '../src/feishu/types.js';
 import { createTranslator, type MessageKey, setActiveLocale } from '../src/i18n/index.js';
+import type { PanelView } from '../src/panel/types.js';
 import { SessionMap } from '../src/session-map.js';
 
 /** A minimal transport fake (only what the commands touch). */
@@ -113,6 +114,11 @@ function makeCommands(overrides: Partial<SurfaceCommandHost> = {}): {
     openPanel: async () => 'msg-panel',
     pushPanel: async () => {},
     ensureAgent: async () => agent,
+    applyModelPick: async (_chatId, provider, model) => ({
+      kind: 'success',
+      text: `model ${provider}/${model}`,
+    }),
+    applyEffortPick: async (_chatId, effort) => ({ kind: 'success', text: `effort ${effort}` }),
     resumeSession: async () => ({ kind: 'success', text: 'resumed' }),
     isWorking: () => false,
     resetChat: () => {},
@@ -273,14 +279,19 @@ describe('surface command set', () => {
     expect(result?.kind).toBe('success');
   });
 
-  it('/model <provider>/<model> sets the default through the service', async () => {
-    const saved: unknown[] = [];
+  it('/model <provider>/<model> delegates the pick to the host (session + default)', async () => {
+    // The host owns the write: only it can keep a thinking depth the target
+    // model accepts (a raw saveSelection replaces the stored section and would
+    // silently drop the chat's level).
+    const picks: Array<{ chatId: string; provider: string; model: string }> = [];
     const { commands } = makeCommands({
       agentDefaultModel: {
         currentSelection: () => ({ provider: 'a', model: 'b' }),
-        saveSelection: async (selection) => {
-          saved.push(selection);
-        },
+        saveSelection: async () => {},
+      },
+      applyModelPick: async (chatId, provider, model) => {
+        picks.push({ chatId, provider, model });
+        return { kind: 'success', text: 'model set' };
       },
     });
     const result = await commands.find('model')?.handler({
@@ -288,8 +299,39 @@ describe('surface command set', () => {
       senderOpenId: 'ou_user',
       rawInput: 'deepseek-official/deepseek-r1',
     });
-    expect(saved).toEqual([{ provider: 'deepseek-official', model: 'deepseek-r1' }]);
+    expect(picks).toEqual([
+      { chatId: 'oc_chat', provider: 'deepseek-official', model: 'deepseek-r1' },
+    ]);
     expect(result?.kind).toBe('success');
+  });
+
+  it('/effort <level> delegates the thinking depth to the host; a bare one opens the model card', async () => {
+    const efforts: Array<{ chatId: string; effort: string }> = [];
+    const pushed: PanelView[] = [];
+    const { commands } = makeCommands({
+      applyEffortPick: async (chatId, effort) => {
+        efforts.push({ chatId, effort });
+        return { kind: 'success', text: `depth ${effort}` };
+      },
+      pushPanel: async (_chatId, view) => {
+        pushed.push(view);
+      },
+    });
+    const typed = await commands.find('effort')?.handler({
+      chatId: 'oc_chat',
+      senderOpenId: 'ou_user',
+      rawInput: ' low',
+    });
+    expect(efforts).toEqual([{ chatId: 'oc_chat', effort: 'low' }]);
+    expect(typed?.kind).toBe('success');
+    const bare = await commands.find('effort')?.handler({
+      chatId: 'oc_chat',
+      senderOpenId: 'ou_user',
+      rawInput: '',
+    });
+    // The model card carries the depth dropdown, so a bare /effort opens it.
+    expect(pushed).toEqual([{ kind: 'picker', picker: 'model', page: 0 }]);
+    expect(bare?.kind).toBe('success');
   });
 
   it('runHarnessCommand executes through the dsh registry', async () => {

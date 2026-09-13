@@ -137,18 +137,21 @@ export class AgentPresetPickAction extends PanelAction {
   }
 }
 
-/** `model-pick` — set the deployment default model. */
+/** `model-pick` — switch the chat's model (session + deployment default),
+ *  keeping the thinking depth when the new model offers it. */
 export class ModelPickAction extends PanelAction {
   readonly kind = 'model-pick';
   readonly allowedWhileWorking = false;
   protected override busyTitle(): string {
     return t('panel.model.title');
   }
-  protected override work(ctx: PanelActionContext, action: CardAction): CommandResult | undefined {
+  protected override work(
+    ctx: PanelActionContext,
+    action: CardAction,
+  ): Promise<CommandResult> | CommandResult | undefined {
     const selection = action.option ?? action.value.selection;
     if (selection === undefined || selection === '') return;
-    const service = ctx.services.agentDefaultModel;
-    if (service === undefined) {
+    if (ctx.services.agentDefaultModel === undefined) {
       return {
         kind: 'error',
         text: t('panel.action.modelPickUnavailable'),
@@ -156,19 +159,11 @@ export class ModelPickAction extends PanelAction {
     }
     const parsed = ctx.parseModelArg(selection);
     if (!parsed.ok) return { kind: 'error', text: parsed.error };
-    void service.saveSelection(parsed.selection);
-    // (B) switch the current session immediately too (not only the default).
-    applySessionModelSwitch(
-      ctx.liveAgent(action.chatId)?.ctx,
-      parsed.selection,
-      ctx.services.logger,
-    );
-    return {
-      kind: 'success',
-      text: t('command.info.modelSet', {
-        selection: `${parsed.selection.provider} · ${parsed.selection.model}`,
-      }),
-    };
+    // The Bridge owns the pick: it saves the new default WITH a reasoning
+    // level the target model accepts (the raw save would replace the stored
+    // section and silently drop the chat's thinking depth) and switches the
+    // live session.
+    return ctx.applyModelPick(action.chatId, parsed.selection.provider, parsed.selection.model);
   }
   protected override async finish(ctx: PanelActionContext, action: CardAction): Promise<void> {
     // A navigation card (has a parent) pops back to the menu; a standalone
@@ -183,10 +178,47 @@ export class ModelPickAction extends PanelAction {
   }
 }
 
+/** `effort-pick` — pin the thinking depth (reasoning effort) of the chat's
+ *  current model.
+ *
+ *  The level is validated against that model before it is applied: DSH does
+ *  not clamp an unsupported effort, so an unadvertised level would only fail
+ *  on the next turn — the Bridge refuses it here instead. */
+export class EffortPickAction extends PanelAction {
+  readonly kind = 'effort-pick';
+  readonly allowedWhileWorking = false;
+  protected override busyTitle(): string {
+    return t('panel.model.title');
+  }
+  protected override work(
+    ctx: PanelActionContext,
+    action: CardAction,
+  ): Promise<CommandResult> {
+    // The dropdown stamps the marker only; the chosen level arrives in
+    // `option`.
+    const effort = action.option ?? action.value.effort;
+    if (effort === undefined || effort === '') {
+      return Promise.resolve({
+        kind: 'error',
+        text: t('panel.action.effortPickInvalid'),
+      });
+    }
+    return ctx.applyEffortPick(action.chatId, effort);
+  }
+  protected override async finish(ctx: PanelActionContext, action: CardAction): Promise<void> {
+    if (ctx.canReturn(action.chatId)) {
+      await ctx.popToMenu(action.chatId);
+    } else {
+      await ctx.replacePanel(action.chatId, ctx.panelViewFor(action.chatId));
+    }
+  }
+}
+
 /** All picker apply actions. */
 export const PICK_ACTIONS: readonly PanelAction[] = [
   new RepoPickAction(),
   new PermissionPickAction(),
   new AgentPresetPickAction(),
   new ModelPickAction(),
+  new EffortPickAction(),
 ];

@@ -11,7 +11,11 @@
  */
 
 import type { Agent } from '@deepseek-ai/dsh-agent';
-import type { AgentPresetsService, PermissionPresetService } from '../../bridge.js';
+import type {
+  AgentPresetsService,
+  ModelReasoningView,
+  PermissionPresetService,
+} from '../../bridge.js';
 import type { ModelOptionView } from '../../cards/render.js';
 import type { SessionDetailView, SessionRowView } from '../../cards/session-list.js';
 import type { CardJson } from '../../feishu/types.js';
@@ -34,6 +38,12 @@ export interface PanelViewContext {
   loadModelOptions(): Promise<readonly ModelOptionView[] | undefined>;
   /** The chat's current model as a `provider/model` selection arg. */
   currentModelSelection(chatId: string): string | undefined;
+  /** The reasoning level the chat's session runs, or `undefined` when nothing
+   *  pins one (the model's own default applies). */
+  currentEffort(chatId: string): string | undefined;
+  /** The reasoning levels the chat's current model advertises, or `undefined`
+   *  when it advertises none (or the model cannot be resolved). */
+  modelReasoning(chatId: string): Promise<ModelReasoningView | undefined>;
   /** Ensure a live agent exists for the chat (picker views act on one). */
   ensureAgent(chatId: string): Promise<Agent>;
   /** The permission-preset service, or `undefined` when not mounted. */

@@ -110,6 +110,11 @@ export interface PanelActionContext {
   /** Apply an agent-preset pick: remember it for the chat's next session and
    *  re-compose a still-blank live agent onto it right away. */
   applyAgentPreset(chatId: string, agentPreset: string): Promise<CommandResult>;
+  /** Apply a model pick: switch the chat's session model AND the deployment
+   *  default, keeping the current reasoning level when the new model offers it. */
+  applyModelPick(chatId: string, provider: string, model: string): Promise<CommandResult>;
+  /** Apply a reasoning-level pick for the chat's current model. */
+  applyEffortPick(chatId: string, effort: string): Promise<CommandResult>;
   liveAgent(chatId: string): Agent | undefined;
   resumeSession(chatId: string, sessionId: string, cwd?: string): Promise<CommandResult>;
   exportSessionLog(chatId: string, sessionId: string): Promise<CommandResult>;

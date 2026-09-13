@@ -146,6 +146,9 @@ export type SurfaceAction =
   // `selection` is optional for the same dropdown-marker reason.
   | { readonly kind: 'model-pick'; readonly selection?: string }
   | { readonly kind: 'model-page'; readonly page: string }
+  // `effort` is optional for the same dropdown-marker reason (the chosen
+  // level arrives in the callback's `option`).
+  | { readonly kind: 'effort-pick'; readonly effort?: string }
   // Interactive approval/question cards (Iteration 3).
   | { readonly kind: 'approval'; readonly decision: 'allow' | 'reject'; readonly id: string }
   | { readonly kind: 'question'; readonly id: string; readonly answer: string }
@@ -1314,20 +1317,49 @@ export interface ModelOptionView {
 /** Model buttons per page in the >50-option fallback. */
 export const MODEL_PAGE_SIZE = 8;
 
+/** One reasoning level as the effort dropdown renders it. */
+export interface ReasoningEffortOptionView {
+  readonly id: string;
+  readonly name: string;
+  readonly description?: string;
+}
+
+/** The reasoning half of the model picker: the levels the CURRENT model
+ *  advertises plus what the session runs now. Level ids are per-model
+ *  capabilities (`off` / `low` / `high` / `max` on the deepseek routes) and
+ *  DSH never clamps, so only advertised levels are offered. */
+export interface ReasoningPickerView {
+  /** The advertised levels, model order. Empty → no dropdown is rendered. */
+  readonly efforts: readonly ReasoningEffortOptionView[];
+  /** The level the session currently PINS, or `undefined` when nothing does
+   *  (the model's own default applies). */
+  readonly current: string | undefined;
+  /** The level the model applies when none is pinned (its advertised default). */
+  readonly modelDefault: string | undefined;
+}
+
 /**
  * Build the /model picker card: a dropdown of the available models
  * (selection = `provider/model`), preselecting the current one, with a
  * quiet note spelling out the current model. Beyond the select option cap
  * it falls back to paginated Select buttons (repo-picker pattern).
+ *
+ * When the current model advertises reasoning levels, a SECOND dropdown
+ * follows — the thinking depth (`off`/`low`/`high`/`max`) for that model.
+ * The two dropdowns are independent actions: picking a model switches the
+ * route (keeping a level the new model also offers), picking a level pins the
+ * depth for the current model.
  * @param options - the model catalog (provider/model entries).
  * @param currentSelection - the current `provider/model`, or `undefined`.
  * @param page - zero-based page index (button fallback only).
+ * @param reasoning - the current model's reasoning levels, or `undefined`.
  * @returns Feishu interactive card JSON (v1 layout).
  */
 export function buildModelPickerCard(
   options: readonly ModelOptionView[],
   currentSelection: string | undefined,
   page = 0,
+  reasoning?: ReasoningPickerView,
 ): CardJson {
   const elements: CardElement[] = [
     {
@@ -1408,6 +1440,55 @@ export function buildModelPickerCard(
       },
     ],
   });
+  // Thinking depth for the CURRENT model. Only the levels the model itself
+  // advertises are offered (DSH rejects an unadvertised effort instead of
+  // clamping), preselected to the pinned level — else to the model's own
+  // default, which is what runs when nothing is pinned.
+  if (reasoning !== undefined && reasoning.efforts.length > 0) {
+    const levels = reasoning.efforts;
+    const pinned = reasoning.current;
+    const matches = (id: string | undefined): id is string =>
+      id !== undefined && levels.some((level) => level.id === id);
+    const preselect = matches(pinned)
+      ? pinned
+      : matches(reasoning.modelDefault)
+        ? reasoning.modelDefault
+        : undefined;
+    elements.push({ tag: 'hr' });
+    elements.push({ tag: 'markdown', content: t('panel.model.effortIntro') });
+    elements.push({
+      tag: 'action',
+      actions: [
+        {
+          tag: 'select_static',
+          placeholder: { tag: 'plain_text', content: t('panel.model.effortPlaceholder') },
+          ...(preselect !== undefined ? { initial_option: preselect } : {}),
+          options: levels.map((level) => ({
+            text: { tag: 'plain_text', content: level.name },
+            value: level.id,
+          })),
+          value: actionValue({ kind: 'effort-pick' }),
+        },
+      ],
+    });
+    const effective = pinned ?? reasoning.modelDefault;
+    const effectiveName =
+      effective === undefined
+        ? undefined
+        : (levels.find((level) => level.id === effective)?.name ?? effective);
+    elements.push({
+      tag: 'note',
+      elements: [
+        {
+          tag: 'plain_text',
+          content:
+            effectiveName === undefined
+              ? t('panel.model.effortNone')
+              : t('panel.model.effortCurrent', { effort: effectiveName }),
+        },
+      ],
+    });
+  }
   return {
     config: { wide_screen_mode: true },
     header: { title: { tag: 'plain_text', content: t('panel.model.title') }, template: 'wathet' },

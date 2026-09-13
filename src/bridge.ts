@@ -55,7 +55,7 @@ import type {
 import { readLogFile } from './log-file.js';
 import { MessageDeduplicator } from './message-dedup.js';
 import { parseModelArg } from './model-args.js';
-import { sessionSelection } from './model-switch.js';
+import { applySessionModelSwitch, sessionSelection } from './model-switch.js';
 import type { PanelActionContext } from './panel/actions/PanelAction.js';
 import { buildPanelActionRegistry } from './panel/actions/registry.js';
 import { PanelController, type PanelHost } from './panel/PanelController.js';
@@ -143,6 +143,27 @@ export function sniffExtension(data: Uint8Array): string {
 function isAgentPresetLocked(error: unknown, rendered: string): boolean {
   const code = (error as { readonly code?: unknown }).code;
   return code === 'agent-preset/locked' || rendered.includes('has already started');
+}
+
+/**
+ * The reasoning level a model switch should pin: the session's current level
+ * when the TARGET model advertises it, else that model's own default, else
+ * nothing (no level pinned — the route/provider default applies).
+ *
+ * Level ids are per-model capabilities and DSH never clamps, so a level the
+ * target does not list must not be carried over silently.
+ * @param reasoning - the target model's reasoning metadata, if any.
+ * @param preferred - the level the session currently runs, if any.
+ * @returns a level id the target model accepts, or `undefined`.
+ */
+function pickReasoningEffort(
+  reasoning: ModelReasoningView | undefined,
+  preferred: string | undefined,
+): string | undefined {
+  const efforts = reasoning?.efforts;
+  if (efforts === undefined || efforts.length === 0) return undefined;
+  if (preferred !== undefined && efforts.some((row) => row.id === preferred)) return preferred;
+  return reasoning?.defaultEffort;
 }
 
 /** Minimal logger surface the bridge needs. */
@@ -283,18 +304,42 @@ export interface LlmModelView {
   readonly inputModalities?: readonly string[];
 }
 
+/** One reasoning level a model advertises (dsh `ReasoningEffortInfo`):
+ *  `off` / `low` / `high` / `max` for the deepseek routes. */
+export interface ReasoningEffortView {
+  readonly id: string;
+  readonly name: string;
+  readonly description?: string;
+}
+
+/** A model's reasoning metadata (`resolveModelInfo().reasoning`). Absent for
+ *  models that advertise no reasoning levels — passing an effort to such a
+ *  model rejects (`UNSUPPORTED_REASONING_EFFORT`), which is why the surface
+ *  only offers what the model itself lists. */
+export interface ModelReasoningView {
+  readonly efforts: readonly ReasoningEffortView[];
+  /** The level the model applies when a request pins none. */
+  readonly defaultEffort?: string;
+}
+
 /** Structural subset of `ctx.llm` (`@deepseek-ai/dsh-llm`, mounted by
  *  dsh-base): provider routes and their advisory model catalogs. */
 export interface LlmService {
   listProviders(): readonly { readonly id: string; readonly name: string }[];
   listModels(provider: string): Promise<readonly LlmModelView[]>;
-  /** Optional model-context resolution (dsh `resolveModelInfo`), used for the
-   *  stats line's context-occupancy group. Absent → the group is omitted. */
+  /** Optional exact-model resolution (dsh `resolveModelInfo`), used for the
+   *  stats line's context-occupancy group AND for the reasoning levels the
+   *  model offers. `listModels` carries no reasoning metadata, so the effort
+   *  picker reads this one. Absent → engine-level session switching stays
+   *  available; the levels are simply not offered. */
   resolveModelInfo?(
     provider: string,
     model: string,
     signal?: AbortSignal,
-  ): Promise<{ readonly context?: { readonly contextWindow?: number } }>;
+  ): Promise<{
+    readonly context?: { readonly contextWindow?: number };
+    readonly reasoning?: ModelReasoningView;
+  }>;
 }
 
 /** The approval settlement union (structural subset of `ApprovalOutcome`). */
@@ -756,6 +801,8 @@ export class Bridge {
       repoRoots: this.options.repoRoots ?? [],
       loadModelOptions: () => this.loadModelOptions(),
       currentModelSelection: (chatId) => this.currentModelSelection(chatId),
+      currentEffort: (chatId) => this.currentEffort(chatId),
+      modelReasoning: (chatId) => this.modelReasoning(chatId),
       ensureAgent: (chatId) => this.ensureAgent(chatId),
       permissionPresets: () => this.options.permissionPresets,
       agentPresets: () => this.agentPresetService(),
@@ -809,6 +856,8 @@ export class Bridge {
       findCommand: (name) => this.commands.find(name),
       ensureAgent: (chatId) => this.ensureAgent(chatId),
       applyAgentPreset: (chatId, agentPreset) => this.applyAgentPreset(chatId, agentPreset),
+      applyModelPick: (chatId, provider, model) => this.applyModelPick(chatId, provider, model),
+      applyEffortPick: (chatId, effort) => this.applyEffortPick(chatId, effort),
       liveAgent: (chatId) => this.liveAgent(chatId),
       resumeSession: (chatId, sessionId, cwd) => this.resumeSession(chatId, sessionId, cwd),
       exportSessionLog: (chatId, sessionId) => this.exportSessionLog(chatId, sessionId),
@@ -1353,24 +1402,78 @@ export class Bridge {
     return this.interactions.askQuestions(request);
   }
 
-  /** The chat's current model as a `provider/model` selection arg. */
-  private currentModelSelection(chatId: string): string | undefined {
+  /**
+   * The chat's effective model selection (provider/model, plus the reasoning
+   * level when one is in force).
+   *
+   * Precedence: a session switch (`/model`, the panel pickers — written into
+   * the agent's coupled ref by `applySessionModelSwitch`) wins, because that
+   * switch does NOT mutate the agent's static `options`, so reading the options
+   * first would show the pre-switch model (the #40 display bug); then the
+   * agent's own options; then the deployment default.
+   */
+  private currentModelTarget(
+    chatId: string,
+  ): { provider: string; model: string; reasoningEffort?: string } | undefined {
     const live = this.liveAgent(chatId);
-    // A session-switched model (via `/model`, dsh web parity) takes precedence:
-    // applySessionModelSwitch writes `selection.current` into the agent's coupled
-    // ref, but the agent's static `options` is NOT mutated, so reading it first
-    // would show the pre-switch model (the #40 display bug). Fall back to the
-    // agent's static options, then the deployment default.
     const switched = sessionSelection(live?.ctx)?.current;
-    if (switched !== undefined) {
-      return `${switched.provider}/${switched.model}`;
-    }
+    if (switched !== undefined) return switched;
     if (live?.options?.provider !== undefined && live?.options?.model !== undefined) {
-      return `${live.options.provider}/${live.options.model}`;
+      return { provider: live.options.provider, model: live.options.model };
     }
     const selection = this.options.agentDefaultModel?.currentSelection();
     if (selection === undefined) return undefined;
-    return `${selection.provider}/${selection.model}`;
+    return {
+      provider: selection.provider,
+      model: selection.model,
+      ...(selection.reasoningEffort !== undefined
+        ? { reasoningEffort: selection.reasoningEffort }
+        : {}),
+    };
+  }
+
+  /** The chat's current model as a `provider/model` selection arg. */
+  private currentModelSelection(chatId: string): string | undefined {
+    const target = this.currentModelTarget(chatId);
+    return target === undefined ? undefined : `${target.provider}/${target.model}`;
+  }
+
+  /**
+   * The reasoning level the chat's session runs, or `undefined` when nothing
+   * pins one (the model's own provider/default level applies).
+   *
+   * A session switch that carries no level CLEARS any inherited effort (the
+   * tri-state contract in `model-switch.ts`), so a live switch is authoritative
+   * even when it omits the level; only without one does the deployment default
+   * speak.
+   */
+  private currentEffort(chatId: string): string | undefined {
+    const switched = sessionSelection(this.liveAgent(chatId)?.ctx)?.current;
+    if (switched !== undefined) return switched.reasoningEffort;
+    return this.options.agentDefaultModel?.currentSelection().reasoningEffort;
+  }
+
+  /** The reasoning levels one exact model advertises, or `undefined` (the
+   *  model has none, or the llm service cannot resolve it). */
+  private async resolveModelReasoning(
+    provider: string,
+    model: string,
+  ): Promise<ModelReasoningView | undefined> {
+    const llm = this.options.llm;
+    if (llm?.resolveModelInfo === undefined) return undefined;
+    try {
+      return (await llm.resolveModelInfo(provider, model)).reasoning;
+    } catch (error: unknown) {
+      this.options.logger.warn(`model info for ${provider}/${model} failed: ${String(error)}`);
+      return undefined;
+    }
+  }
+
+  /** The reasoning levels the chat's current model advertises. */
+  private async modelReasoning(chatId: string): Promise<ModelReasoningView | undefined> {
+    const target = this.currentModelTarget(chatId);
+    if (target === undefined) return undefined;
+    return this.resolveModelReasoning(target.provider, target.model);
   }
 
   /** Best-effort model context window (tokens) for a chat's current model.
@@ -1493,6 +1596,115 @@ export class Bridge {
         kind: 'error',
         text: t('panel.action.agentPresetSwitchFailed', { preset: label, detail }),
       };
+    }
+  }
+
+  /**
+   * Apply a model pick from the panel or `/model`: pin the new provider/model
+   * for this session AND the deployment default, KEEPING the chat's current
+   * reasoning level when the new model advertises it (otherwise the new
+   * model's own default level applies).
+   *
+   * Keeping the level matters: the deployment-default write REPLACES the whole
+   * stored section, so an unqualified save silently dropped a saved level —
+   * switching models used to reset the thinking depth without telling anyone.
+   * @param chatId - the chat the pick came from.
+   * @param provider - the chosen provider route.
+   * @param model - the chosen model id.
+   * @returns the user-facing outcome.
+   */
+  async applyModelPick(chatId: string, provider: string, model: string): Promise<CommandResult> {
+    const service = this.options.agentDefaultModel;
+    if (service === undefined) {
+      return { kind: 'error', text: t('command.error.modelSwitchUnavailable') };
+    }
+    const reasoning = await this.resolveModelReasoning(provider, model);
+    const reasoningEffort = pickReasoningEffort(reasoning, this.currentEffort(chatId));
+    const selection = {
+      provider,
+      model,
+      ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+    };
+    // The session switch is the promise this command makes; the default write
+    // stays best-effort (a settings failure must not leave the chat unmoved).
+    // ensureAgent (not liveAgent): the model card is a read-only catalog and
+    // does NOT create an agent, so a chat that never ran a turn has none yet —
+    // without one the switch would silently no-op.
+    const agent = await this.ensureSwitchAgent(chatId);
+    applySessionModelSwitch(agent?.ctx, selection, this.options.logger);
+    try {
+      await service.saveSelection(selection);
+    } catch (error: unknown) {
+      this.options.logger.warn(`saving the default model failed: ${String(error)}`);
+    }
+    const effortSuffix =
+      reasoningEffort === undefined ? '' : t('status.effortSuffix', { effort: reasoningEffort });
+    return {
+      kind: 'success',
+      text: t('command.info.modelSet', { selection: `${provider} · ${model}${effortSuffix}` }),
+    };
+  }
+
+  /**
+   * Apply a reasoning-level pick: validate it against the chat's CURRENT model
+   * (DSH never clamps — an unadvertised level rejects at request time, so the
+   * surface refuses it up front), pin it on the session, and save it as the
+   * deployment default.
+   * @param chatId - the chat the pick came from.
+   * @param effort - the chosen level id (`off` / `low` / `high` / `max`).
+   * @returns the user-facing outcome.
+   */
+  async applyEffortPick(chatId: string, effort: string): Promise<CommandResult> {
+    const target = this.currentModelTarget(chatId);
+    if (target === undefined) {
+      return { kind: 'error', text: t('command.error.modelSelectionUnavailable') };
+    }
+    const reasoning = await this.resolveModelReasoning(target.provider, target.model);
+    const efforts = reasoning?.efforts ?? [];
+    if (efforts.length === 0) {
+      return { kind: 'error', text: t('command.error.effortUnsupported', { model: target.model }) };
+    }
+    const match = efforts.find((row) => row.id === effort);
+    if (match === undefined) {
+      return {
+        kind: 'error',
+        text: t('command.error.effortUnknown', {
+          effort,
+          levels: efforts.map((row) => row.id).join(', '),
+        }),
+      };
+    }
+    const selection = { provider: target.provider, model: target.model, reasoningEffort: match.id };
+    // Same reason as applyModelPick: the agent may not exist yet (the picker
+    // only reads the catalog), and the level must reach a live agent to take
+    // effect on the next turn.
+    const agent = await this.ensureSwitchAgent(chatId);
+    applySessionModelSwitch(agent?.ctx, selection, this.options.logger);
+    try {
+      await this.options.agentDefaultModel?.saveSelection(selection);
+    } catch (error: unknown) {
+      this.options.logger.warn(`saving the default reasoning effort failed: ${String(error)}`);
+    }
+    return { kind: 'success', text: t('command.info.effortSet', { effort: match.name }) };
+  }
+
+  /**
+   * Ensure a live agent for a model/effort switch. The picker cards only READ
+   * the catalog, so a chat that never ran a turn has no agent yet — and
+   * `applySessionModelSwitch` is a silent no-op without one. A failure here is
+   * logged, not fatal: the deployment default is still written, so the choice
+   * reaches the chat's next session.
+   * @param chatId - the chat the pick came from.
+   * @returns the live agent, or `undefined` when it could not be ensured.
+   */
+  private async ensureSwitchAgent(chatId: string): Promise<Agent | undefined> {
+    try {
+      return await this.ensureAgent(chatId);
+    } catch (error: unknown) {
+      this.options.logger.warn(
+        `ensuring an agent for a model/effort switch failed: ${String(error)}`,
+      );
+      return undefined;
     }
   }
 
@@ -2362,6 +2574,7 @@ export class Bridge {
       case 'permission-pick':
       case 'agent-preset-pick':
       case 'model-pick':
+      case 'effort-pick':
       case 'model-page': {
         // Panel actions are Strategy objects dispatched through the
         // registry; the base-class template owns the lifecycle (gate /
@@ -2488,6 +2701,8 @@ export class Bridge {
       },
       ensureAgent: (chatId) => bridge.ensureAgent(chatId),
       applyAgentPreset: (chatId, agentPreset) => bridge.applyAgentPreset(chatId, agentPreset),
+      applyModelPick: (chatId, provider, model) => bridge.applyModelPick(chatId, provider, model),
+      applyEffortPick: (chatId, effort) => bridge.applyEffortPick(chatId, effort),
       resumeSession: (chatId, sessionId, cwd) => bridge.resumeSession(chatId, sessionId, cwd),
       isWorking: (chatId) => bridge.refuseWhileWorking(chatId),
       resetChat: (chatId) => bridge.resetChatState(chatId),

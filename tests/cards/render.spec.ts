@@ -904,6 +904,45 @@ describe('buildModelPickerCard', () => {
     ).toBe(true);
   });
 
+  it('adds the thinking-depth dropdown when the current model advertises levels', () => {
+    const card = buildModelPickerCard(options, 'deepseek-official/deepseek-v4-flash', 0, {
+      efforts: [
+        { id: 'off', name: 'Off' },
+        { id: 'low', name: 'Low' },
+        { id: 'high', name: 'High' },
+        { id: 'max', name: 'Max' },
+      ],
+      current: 'low',
+      modelDefault: 'high',
+    });
+    const actions = card.elements.filter((el) => el.tag === 'action');
+    const effortSelect = selectOf(actions[1]);
+    expect(effortSelect?.value).toEqual({ kind: 'effort-pick' });
+    // Only the levels the model itself advertises (DSH never clamps).
+    expect(effortSelect?.options.map((o) => o.value)).toEqual(['off', 'low', 'high', 'max']);
+    // The pinned level is preselected and the note spells out what runs.
+    expect(effortSelect?.initial_option).toBe('low');
+    expect(JSON.stringify(card.elements)).toContain('Thinking depth: Low');
+  });
+
+  it('preselects the model default when nothing is pinned; no dropdown without levels', () => {
+    const card = buildModelPickerCard(options, 'deepseek-official/deepseek-v4-flash', 0, {
+      efforts: [
+        { id: 'off', name: 'Off' },
+        { id: 'high', name: 'High' },
+      ],
+      current: undefined,
+      modelDefault: 'high',
+    });
+    const effortSelect = selectOf(card.elements.filter((el) => el.tag === 'action')[1]);
+    expect(effortSelect?.initial_option).toBe('high');
+    expect(JSON.stringify(card.elements)).toContain('Thinking depth: High');
+    // No reasoning metadata → one dropdown only, and no depth copy at all.
+    const plain = buildModelPickerCard(options, 'deepseek-official/deepseek-v4-flash');
+    expect(plain.elements.filter((el) => el.tag === 'action')).toHaveLength(1);
+    expect(JSON.stringify(plain.elements)).not.toContain('Thinking depth');
+  });
+
   it('falls back to paginated Select buttons beyond the dropdown cap', () => {
     const many = Array.from({ length: 60 }, (_, i) => ({
       value: `provider-${i}/model-${i}`,

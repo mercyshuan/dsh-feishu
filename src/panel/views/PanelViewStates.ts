@@ -156,7 +156,8 @@ export class RepoPickerViewState implements PanelViewState {
   }
 }
 
-/** `picker:model` — the model picker (async: loads the provider catalog). */
+/** `picker:model` — the model picker (async: loads the provider catalog plus
+ *  the current model's reasoning levels). */
 export class ModelPickerViewState implements PanelViewState {
   readonly key = 'picker:model';
   readonly asyncData = true;
@@ -167,7 +168,14 @@ export class ModelPickerViewState implements PanelViewState {
       ...option,
       current: option.value === current,
     }));
-    return buildModelPickerCard(withCurrent, current);
+    // The thinking depth belongs to the CURRENT model: the card offers only
+    // the levels that model advertises (`resolveModelInfo().reasoning`).
+    const reasoning = await ctx.modelReasoning(chatId);
+    return buildModelPickerCard(withCurrent, current, 0, {
+      efforts: reasoning?.efforts ?? [],
+      current: ctx.currentEffort(chatId),
+      modelDefault: reasoning?.defaultEffort,
+    });
   }
 }
 

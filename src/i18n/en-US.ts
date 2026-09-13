@@ -204,6 +204,12 @@ export const enMessages = {
   'panel.model.noneSelected': 'No model selected yet.',
   'panel.model.intro':
     '**Choose a model** — the pick switches THIS session’s model immediately and saves the default for new sessions.',
+  'panel.model.effortIntro':
+    '**Thinking depth** — how much reasoning the current model spends per turn.',
+  'panel.model.effortPlaceholder': 'Choose a thinking depth…',
+  'panel.model.effortNone': 'No thinking depth is pinned — the model’s own default applies.',
+  'panel.model.effortCurrent': 'Thinking depth: {effort}',
+  'panel.action.effortPickInvalid': 'No thinking depth was chosen.',
   'panel.category.agent': '🤖 Agent',
   'panel.category.session': '🧩 Session',
   'panel.category.chat': '💬 Chat',
@@ -339,6 +345,12 @@ export const enMessages = {
   'command.info.logSent': 'Sent the dsh-feishu log ({count} bytes).',
   'command.info.groupCreated': 'Group created: {name} ({chatId})',
   'command.info.modelSet': 'Model set to {selection} (this session + default).',
+  'command.cmd.effort.label': '🧠 Thinking depth',
+  'command.help.effort': 'Set the thinking depth (reasoning effort) of the current model',
+  'command.info.effortSet': 'Thinking depth set to {effort}.',
+  'command.error.effortUnsupported': 'the current model ({model}) offers no reasoning levels.',
+  'command.error.effortUnknown':
+    'unknown thinking depth "{effort}" for this model — available: {levels}.',
   'command.info.permissionSwitched': 'Permission preset switched to {preset}.',
   'command.info.agentPresetSwitched': 'Agent preset switched to {preset}.',
   'command.info.agentPresetNextSession':

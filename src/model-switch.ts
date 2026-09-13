@@ -19,11 +19,35 @@
 
 import type { Context } from '@deepseek-ai/cordis';
 import { installModelSelection } from '@deepseek-ai/dsh-agent';
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm';
 
-/** A selected provider/model (structural subset of dsh's `ModelSelection`). */
+/**
+ * A selected provider/model plus an optional reasoning effort (structural
+ * subset of dsh's `ModelSelection`).
+ *
+ * The effort is TRI-STATE at the request-routing layer
+ * (`dsh-agent`'s `installModelSelection`):
+ *
+ * - a string → that effort is applied to the request, overriding whatever the
+ *   route/default would have resolved;
+ * - `undefined` → any inherited effort is CLEARED, restoring the selected
+ *   model's own provider/default behavior;
+ * - (no selection at all → the route is untouched.)
+ *
+ * That is why clearing a level is expressed by omitting the field rather than
+ * by sending a placeholder.
+ */
 export interface ModelSelectionRef {
-  current: { provider: string; model: string } | undefined;
-  assembled: { provider: string; model: string } | undefined;
+  current: SessionModelSelection | undefined;
+  assembled: SessionModelSelection | undefined;
+}
+
+/** What one session switch pins. `reasoningEffort` is the engine's branded
+ *  level id, so it is only ever produced through {@link ReasoningEffortId}. */
+interface SessionModelSelection {
+  readonly provider: string;
+  readonly model: string;
+  readonly reasoningEffort?: ReturnType<typeof ReasoningEffortId>;
 }
 
 const refs = new WeakMap<object, ModelSelectionRef>();
@@ -61,20 +85,53 @@ export function sessionSelection(agentCtx: Context | undefined): ModelSelectionR
 }
 
 /**
- * Switch the model for one live agent's session (`next` becomes the model the
- * next turn assembles). No-op when `agentCtx` is undefined (already handled by
- * the caller). Does not touch the deployment default — the caller saves that
- * separately.
+ * Switch the model (and optionally the reasoning effort) for one live agent's
+ * session (`next` becomes what the next turn assembles). No-op when `agentCtx`
+ * is undefined (already handled by the caller). Does not touch the deployment
+ * default — the caller saves that separately.
+ *
+ * Omitting `reasoningEffort` CLEARS any inherited effort (the model's own
+ * provider/default level applies again); pass a string to pin one.
  * @param agentCtx - the live agent's scoped context (or undefined for no-op).
- * @param selection - the `{ provider, model }` to apply to this session.
+ * @param selection - the `{ provider, model, reasoningEffort? }` to apply.
  * @param logger - optional bridge logger for debug tracing (`FEISHU_DEBUG=1`).
  */
 export function applySessionModelSwitch(
   agentCtx: Context | undefined,
-  selection: { provider: string; model: string },
+  selection: { provider: string; model: string; reasoningEffort?: string },
   logger?: { debug: (msg: string) => void },
 ): void {
   if (agentCtx === undefined) return;
-  sessionSelectionFor(agentCtx).current = selection;
-  logger?.debug(`[feishu] model switch session to ${selection.provider}/${selection.model}`);
+  // The engine expects a BRANDED level id, and an ABSENT level must stay
+  // absent (that is what clears an inherited effort), so the field is built
+  // conditionally rather than passed through.
+  sessionSelectionFor(agentCtx).current =
+    selection.reasoningEffort === undefined
+      ? { provider: selection.provider, model: selection.model }
+      : {
+          provider: selection.provider,
+          model: selection.model,
+          reasoningEffort: ReasoningEffortId(selection.reasoningEffort),
+        };
+  logger?.debug(
+    `[feishu] model switch session to ${selection.provider}/${selection.model} ` +
+      `effort=${selection.reasoningEffort ?? '(model default)'}`,
+  );
+}
+
+/**
+ * Switch ONLY the reasoning effort of one live agent's session, keeping its
+ * provider/model. `undefined` clears the pinned level (tri-state semantics —
+ * see {@link ModelSelectionRef}).
+ * @param agentCtx - the live agent's scoped context (or undefined for no-op).
+ * @param selection - the provider/model the session currently runs, plus the
+ *   effort to pin (or `undefined` to clear it).
+ * @param logger - optional bridge logger for debug tracing.
+ */
+export function applySessionEffort(
+  agentCtx: Context | undefined,
+  selection: { provider: string; model: string; reasoningEffort?: string },
+  logger?: { debug: (msg: string) => void },
+): void {
+  applySessionModelSwitch(agentCtx, selection, logger);
 }
