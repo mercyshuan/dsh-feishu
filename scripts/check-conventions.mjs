@@ -21,9 +21,12 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { relative, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { checkReadmeSync, loadTrack } from './version-track-lib.mjs';
 
-const ROOT = new URL('..', import.meta.url).pathname;
+// `new URL(…).pathname` yields a leading-slash path ("/D:/…") on Windows,
+// which is not a valid cwd there — every git call then dies with ENOENT.
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
 let failures = 0;
 
 /** Print a violation and bump the failure counter. */
