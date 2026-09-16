@@ -323,11 +323,14 @@ function hasEditForm(card: CardJson): boolean {
   return card.elements.some((el) => el.tag === 'form' && el.name === 'queue-edit');
 }
 
-/** The text of a queued user message (joined text blocks). */
+/** The text of a queued user message (joined text blocks). The injected
+ *  identity block is agent-facing metadata, never the user's own words, so it
+ *  is filtered out — the same rule the queue card's preview follows. */
 function lastText(message: UserMessage): string {
   return message.content
     .filter((block) => block.type === 'text')
     .map((block) => (block as { text: string }).text)
+    .filter((text) => !text.startsWith('[Feishu identity]'))
     .join('\n');
 }
 

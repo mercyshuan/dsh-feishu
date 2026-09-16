@@ -7,7 +7,7 @@
  * covered end to end without any network).
  */
 
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import type { Agent } from '@deepseek-ai/dsh-agent';
@@ -255,6 +255,8 @@ function makeHarness(
     sessionTitle?: NonNullable<BridgeOptions['sessionTitle']>;
     getWorkspaceRegistry?: NonNullable<BridgeOptions['getWorkspaceRegistry']>;
     saveInboundFile?: NonNullable<BridgeOptions['saveInboundFile']>;
+    identityAliasesFile?: string;
+    identityInjection?: boolean;
   } = {},
 ): Harness {
   const transport = new RecordingTransport();
@@ -307,6 +309,14 @@ function makeHarness(
       ? { getWorkspaceRegistry: options.getWorkspaceRegistry }
       : {}),
     ...(options.saveInboundFile !== undefined ? { saveInboundFile: options.saveInboundFile } : {}),
+    // Identity injection keeps its PRODUCTION default (on) unless a case turns
+    // it off explicitly — the identity tests below also cover both settings.
+    ...(options.identityAliasesFile !== undefined
+      ? { identityAliasesFile: options.identityAliasesFile }
+      : {}),
+    ...(options.identityInjection !== undefined
+      ? { identityInjection: options.identityInjection }
+      : {}),
     // Tests default the working-directory gate OFF (production defaults it
     // ON); the gate's own tests enable it explicitly.
     requireWorkingDir: options.requireWorkingDir ?? false,
@@ -324,6 +334,12 @@ function makeHarness(
     disposeEvents: () => () => {},
     emit,
   };
+}
+
+/** The text of the identity block the surface injects into every turn — it is
+ *  always the FIRST content block (identity injection). */
+function leadingIdentity(blocks: readonly { readonly type: string; readonly text?: string }[]): string {
+  return blocks[0]?.text ?? '';
 }
 
 function message(overrides: Partial<FeishuMessage> = {}): FeishuMessage {
@@ -395,7 +411,10 @@ describe('Bridge', () => {
     expect(h.agentStore.created).toEqual([{ sessionId: 'feishu-session-1', cwd: '/work' }]);
     const followups = h.agentStore.followups.get('feishu-session-1');
     expect(followups).toHaveLength(1);
-    expect(followups?.[0]?.content).toEqual([{ type: 'text', text: 'hello' }]);
+    // Identity injection leads the turn; the user's own text follows it.
+    const content = followups?.[0]?.content ?? [];
+    expect(leadingIdentity(content)).toContain('[Feishu identity]');
+    expect(content.slice(1)).toEqual([{ type: 'text', text: 'hello' }]);
     expect(h.transport.sentCards).toHaveLength(1);
   });
 
@@ -657,11 +676,19 @@ describe('Bridge', () => {
       }>;
     }
 
+    /** The blocks AFTER the always-leading identity block: what the quote (and
+     *  the user's own words) contribute to the turn. */
+    function quotedBlocks(h: Harness): Array<{ type: string; text: string }> {
+      const blocks = firstBlocks(h);
+      expect(blocks[0]?.text ?? '').toContain('[Feishu identity]');
+      return blocks.slice(1);
+    }
+
     it('injects the quoted message content into the turn, ahead of the user text', async () => {
       const h = makeHarness();
       await h.bridge.handleMessage(message({ text: 'what about this?', quoted: quoted() }));
 
-      const blocks = firstBlocks(h);
+      const blocks = quotedBlocks(h);
       expect(blocks).toHaveLength(2);
       expect(blocks[0]?.type).toBe('text');
       expect(blocks[0]?.text).toContain('ou_other');
@@ -686,7 +713,7 @@ describe('Bridge', () => {
         }),
       );
 
-      const blocks = firstBlocks(h);
+      const blocks = quotedBlocks(h);
       expect(blocks[0]?.text).toContain('/work/.dsh_feishu/attachments/img_q.png');
       expect(blocks[0]?.text).toContain('look at this');
       // The quoted file was sent earlier, not now: no receipt card for it.
@@ -705,7 +732,7 @@ describe('Bridge', () => {
           }),
         }),
       );
-      expect(firstBlocks(h)[0]?.text).toContain('download failed');
+      expect(quotedBlocks(h)[0]?.text).toContain('download failed');
     });
 
     it('reports an unreadable quote instead of silently dropping it', async () => {
@@ -715,7 +742,7 @@ describe('Bridge', () => {
           quoted: quoted({ text: '', unavailable: 'the quoted message was recalled' }),
         }),
       );
-      const text = firstBlocks(h)[0]?.text ?? '';
+      const text = quotedBlocks(h)[0]?.text ?? '';
       expect(text).toContain('could not be read');
       expect(text).toContain('recalled');
     });
@@ -725,7 +752,7 @@ describe('Bridge', () => {
       await h.bridge.handleMessage(
         message({ quoted: quoted({ text: '', unsupportedType: 'interactive' }) }),
       );
-      expect(firstBlocks(h)[0]?.text).toContain('interactive');
+      expect(quotedBlocks(h)[0]?.text).toContain('interactive');
     });
 
     it('a quoted bare attachment message starts its own turn (no pending wait)', async () => {
@@ -745,10 +772,148 @@ describe('Bridge', () => {
 
       // Quoting IS an instruction: the turn runs now, with the quote and the
       // fresh attachment in it.
-      const blocks = firstBlocks(h);
+      const blocks = quotedBlocks(h);
       expect(blocks).toHaveLength(2);
       expect(blocks[0]?.text).toContain('earlier context');
       expect(blocks[1]?.text).toContain('/work/.dsh_feishu/attachments/q.png');
+    });
+  });
+
+  describe('inbound identity injection', () => {
+    const aliasesFile = join(SCRATCH, 'identity-aliases.json');
+
+    /** Write one alias table to the harness's alias file. */
+    function writeAliases(aliases: Record<string, unknown>): void {
+      writeFileSync(aliasesFile, JSON.stringify({ version: 1, aliases }, null, 2));
+    }
+
+    /** The text blocks the first followup delivered to the agent. */
+    function deliveredBlocks(h: Harness): Array<{ type: string; text: string }> {
+      return (h.agentStore.followups.get('feishu-session-1')?.[0]?.content ?? []) as Array<{
+        type: string;
+        text: string;
+      }>;
+    }
+
+    it('leads the turn with the registered person: nickname, name and knowledge base', async () => {
+      writeAliases({
+        ou_wang: {
+          name: '王天义',
+          nickname: '小义',
+          knowledgeBase: 'D:\\feishu-agent\\docs\\wangtianyi',
+        },
+      });
+      // No `identityInjection` passed: the PRODUCTION default (on) applies.
+      const h = makeHarness({ identityAliasesFile: aliasesFile });
+      await h.bridge.handleMessage(message({ senderOpenId: 'ou_wang', text: 'hello' }));
+
+      const blocks = deliveredBlocks(h);
+      // Exactly ONE identity block, and it comes before the user's own text.
+      expect(blocks.filter((b) => b.text.includes('[Feishu identity]'))).toHaveLength(1);
+      expect(blocks[0]?.text.split('\n')).toEqual([
+        '[Feishu identity] 当前对话对象：小义（王天义）· 知识库：D:\\feishu-agent\\docs\\wangtianyi · sender_open_id=ou_wang · chat=oc_chat · 类型：私聊',
+        '（这是本次请求的发送者身份；按其身份作答，关于此人的个人信息只读写其知识库。）',
+      ]);
+      expect(blocks[1]).toEqual({ type: 'text', text: 'hello' });
+      expect(h.transport.sentCards).toHaveLength(1);
+    });
+
+    it('names the unknown sender and quotes the alias-table path to register them', async () => {
+      writeAliases({});
+      const h = makeHarness({ identityAliasesFile: aliasesFile });
+      await h.bridge.handleMessage(message({ senderOpenId: 'ou_nobody', text: 'who am I?' }));
+
+      const blocks = deliveredBlocks(h);
+      expect(blocks[0]?.text.split('\n')).toEqual([
+        '[Feishu identity] 未知发件人 · sender_open_id=ou_nobody · chat=oc_chat · 类型：私聊',
+        `（这是本次请求的发送者身份，但尚未登记姓名；在依赖身份作答前先向对方确认，并提示把结果登记到别名表文件：${aliasesFile}。）`,
+      ]);
+      expect(blocks[1]).toEqual({ type: 'text', text: 'who am I?' });
+    });
+
+    it('defaults to <dataDir>/identity-aliases.json when no path is configured', async () => {
+      // The harness's dataDir is '/work', so the derived path is
+      // '/work/identity-aliases.json' — absent here, hence the unknown path.
+      const h = makeHarness();
+      await h.bridge.handleMessage(message({ senderOpenId: 'ou_wang' }));
+      expect(leadingIdentity(deliveredBlocks(h))).toContain('未知发件人');
+      expect(leadingIdentity(deliveredBlocks(h))).toContain(
+        join(join('/work'), 'identity-aliases.json'),
+      );
+    });
+
+    it('degrades a corrupted alias table to "unknown sender" and still delivers the message', async () => {
+      writeFileSync(aliasesFile, '{ not json');
+      const h = makeHarness({ identityAliasesFile: aliasesFile });
+      await h.bridge.handleMessage(message({ senderOpenId: 'ou_wang', text: 'still works' }));
+
+      const blocks = deliveredBlocks(h);
+      expect(blocks).toHaveLength(2);
+      expect(blocks[0]?.text).toContain('未知发件人');
+      expect(blocks[1]).toEqual({ type: 'text', text: 'still works' });
+      // The turn ran normally: card open + agent followup.
+      expect(h.transport.sentCards).toHaveLength(1);
+    });
+
+    it('hot-reloads an externally rewritten alias table (no restart)', async () => {
+      writeAliases({});
+      const h = makeHarness({ identityAliasesFile: aliasesFile });
+      await h.bridge.handleMessage(message({ senderOpenId: 'ou_wang', text: 'first' }));
+      expect(leadingIdentity(deliveredBlocks(h))).toContain('未知发件人');
+
+      // The agent (or an operator) registers the person while the chat is live.
+      writeAliases({ ou_wang: { name: '王天义', nickname: '小义', knowledgeBase: 'kb/wang' } });
+      await h.bridge.handleMessage(
+        message({ messageId: 'om_msg2', senderOpenId: 'ou_wang', text: 'second' }),
+      );
+      const second = (h.agentStore.followups.get('feishu-session-1')?.[1]?.content ??
+        []) as Array<{ type: string; text: string }>;
+      expect(leadingIdentity(second)).toContain('当前对话对象：小义（王天义）');
+      expect(leadingIdentity(second)).toContain('· 知识库：kb/wang ·');
+      expect(second[1]).toEqual({ type: 'text', text: 'second' });
+    });
+
+    it('injects nothing when identityInjection is false', async () => {
+      writeAliases({ ou_wang: { name: '王天义', nickname: '小义' } });
+      const h = makeHarness({ identityAliasesFile: aliasesFile, identityInjection: false });
+      await h.bridge.handleMessage(message({ senderOpenId: 'ou_wang', text: 'hello' }));
+      expect(deliveredBlocks(h)).toEqual([{ type: 'text', text: 'hello' }]);
+    });
+
+    it('injects the block for a group message and for a quote+attachment turn', async () => {
+      writeAliases({ ou_wang: { name: '王天义', nickname: '小义' } });
+      const h = makeHarness({
+        identityAliasesFile: aliasesFile,
+        groupMentionMode: 'always',
+        saveInboundFile: async () => Promise.resolve({ path: '/work/attachments/a.png' }),
+      });
+      h.transport.downloadImageImpl = async () => ({
+        data: new Uint8Array([137, 80, 78, 71]),
+        mediaType: 'image/png',
+      });
+      await h.bridge.handleMessage(
+        groupMessage(['ou_bot'], {
+          senderOpenId: 'ou_wang',
+          chatId: 'oc_group',
+          text: '',
+          quoted: {
+            messageId: 'om_parent',
+            senderOpenId: 'ou_other',
+            text: 'earlier context',
+            attachments: [],
+          },
+          attachments: [{ kind: 'image', key: 'img_now' }],
+        }),
+      );
+
+      // A pure-attachment group message that quotes: the identity block is
+      // still the FIRST block, ahead of the quote and the file note.
+      const blocks = deliveredBlocks(h);
+      expect(blocks[0]?.text).toContain('类型：群聊');
+      expect(blocks[0]?.text).toContain('chat=oc_group');
+      expect(blocks[1]?.text).toContain('[End of the replied-to message]');
+      expect(blocks.at(-1)?.text).toContain('/work/attachments/a.png');
+      expect(h.agentStore.followups.get('feishu-session-1')).toHaveLength(1);
     });
   });
 
@@ -780,9 +945,9 @@ describe('Bridge', () => {
   it('a blank message is delivered as-is (no crash, no special case)', async () => {
     const h = makeHarness();
     await h.bridge.handleMessage(message({ text: '   ' }));
-    expect(h.agentStore.followups.get('feishu-session-1')?.[0]?.content).toEqual([
-      { type: 'text', text: '   ' },
-    ]);
+    const content = h.agentStore.followups.get('feishu-session-1')?.[0]?.content ?? [];
+    expect(leadingIdentity(content)).toContain('[Feishu identity]');
+    expect(content.slice(1)).toEqual([{ type: 'text', text: '   ' }]);
   });
 
   it('reuses the existing agent for a second message in the same chat', async () => {
@@ -856,12 +1021,13 @@ describe('Bridge', () => {
       },
     } as unknown as SessionEvent);
     await h.bridge.handleEvent('feishu-session-1', turnEndEvent());
-    // Cards default collapsed: the sequence line shows, and the toggle reads
-    // '▸ Expand'. Expanding reveals the ✅ row.
+    // Cards default collapsed: the folded line shows the current activity
+    // (no reasoning in this turn → the latest row's own line), and the toggle
+    // reads '▸ Expand'. Expanding reveals the ✅ row.
     const collapsed = h.transport.updatedCards.at(-1);
     expect(
       collapsed?.elements.some(
-        (el) => el.tag === 'markdown' && 'content' in el && el.content === 'bash',
+        (el) => el.tag === 'markdown' && 'content' in el && el.content === '✅ Bash · ls',
       ),
     ).toBe(true);
     await h.bridge.handleCardAction({
@@ -886,10 +1052,10 @@ describe('Bridge', () => {
     expect(doneLabels(1)).toEqual(['▾ Collapse']);
   });
 
-  it('streams the collapsed sequence as rows arrive', async () => {
+  it('streams the folded line as rows arrive', async () => {
     const h = makeHarness({ throttleMs: 0 });
     await h.bridge.handleMessage(message());
-    // First tool call → collapsed line reads 'bash'.
+    // First tool call → the folded line follows the current activity.
     await h.bridge.handleEvent('feishu-session-1', {
       type: 'tool/call',
       seq: 1,
@@ -901,10 +1067,10 @@ describe('Bridge', () => {
     const first = h.transport.updatedCards.at(-1);
     expect(
       first?.elements.some(
-        (el) => el.tag === 'markdown' && 'content' in el && el.content === 'bash',
+        (el) => el.tag === 'markdown' && 'content' in el && el.content === '🔧 Bash · ls',
       ),
     ).toBe(true);
-    // Second call appends to the sequence line — still collapsed.
+    // Second call moves the folded line on — still collapsed.
     await h.bridge.handleEvent('feishu-session-1', {
       type: 'tool/call',
       seq: 2,
@@ -915,7 +1081,7 @@ describe('Bridge', () => {
     const second = h.transport.updatedCards.at(-1);
     expect(
       second?.elements.some(
-        (el) => el.tag === 'markdown' && 'content' in el && el.content === 'bash → read',
+        (el) => el.tag === 'markdown' && 'content' in el && el.content === '🔧 Read · a.ts',
       ),
     ).toBe(true);
     await h.bridge.handleEvent('feishu-session-1', turnEndEvent());
@@ -931,11 +1097,11 @@ describe('Bridge', () => {
       data: { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'hmm…' } },
     } as unknown as SessionEvent);
     await h.bridge.handleEvent('feishu-session-1', turnEndEvent());
-    // Collapsed by default: the sequence line carries 'think'.
+    // Collapsed by default: the folded line carries the current thinking.
     const last = h.transport.updatedCards.at(-1);
     expect(
       last?.elements.some(
-        (el) => el.tag === 'markdown' && 'content' in el && el.content === 'think',
+        (el) => el.tag === 'markdown' && 'content' in el && el.content === '☁️ hmm…',
       ),
     ).toBe(true);
   });
@@ -1002,7 +1168,7 @@ describe('Bridge', () => {
     const expanded = h.transport.updatedCards.at(-1);
     expect(h.transport.updatedCards.length).toBe(before + 1);
     expect(expanded?.elements.some((el) => el.tag === 'column_set')).toBe(true);
-    // Toggling again collapses back to the minimal sequence.
+    // Toggling again collapses back to the folded line.
     await h.bridge.handleCardAction({
       messageId: 'msg-1',
       chatId: 'oc_chat',
@@ -1013,7 +1179,7 @@ describe('Bridge', () => {
     const collapsed = h.transport.updatedCards.at(-1);
     expect(
       collapsed?.elements.some(
-        (el) => el.tag === 'markdown' && 'content' in el && el.content === 'bash',
+        (el) => el.tag === 'markdown' && 'content' in el && el.content === '🔧 Bash · ls',
       ),
     ).toBe(true);
     expect(collapsed?.elements.some((el) => el.tag === 'column_set')).toBe(false);
@@ -1592,12 +1758,12 @@ describe('Bridge', () => {
         data: { turn: 0, step: 0, callId: 'call-1', name: 'bash', arguments: '{"command":"ls"}' },
       } as unknown as SessionEvent);
       await new Promise((resolve) => setTimeout(resolve, 0));
-      // Collapsed by default → sequence line; toggle expands while working.
+      // Collapsed by default → the folded line; toggle expands while working.
       expect(
         h.transport.updatedCards
           .at(-1)
           ?.elements.some(
-            (el) => el.tag === 'markdown' && 'content' in el && el.content === 'bash',
+            (el) => el.tag === 'markdown' && 'content' in el && el.content === '🔧 Bash · ls',
           ),
       ).toBe(true);
       // The callback must carry the clicked card's own message id (the
@@ -1842,9 +2008,12 @@ describe('Bridge', () => {
       const h = makeHarness({ groupMentionMode: 'always' });
       await h.bridge.handleMessage(groupMessage(['ou_bot'], { text: '' }));
       expect(h.agentStore.followups.get('feishu-session-1')).toHaveLength(1);
-      expect(h.agentStore.followups.get('feishu-session-1')?.[0]?.content).toEqual([
-        { type: 'text', text: '' },
-      ]);
+      // An @-only message has no text of its own: the identity block (always
+      // injected, group included) is the turn's only content block.
+      const content = h.agentStore.followups.get('feishu-session-1')?.[0]?.content ?? [];
+      expect(content).toHaveLength(1);
+      expect(leadingIdentity(content)).toContain('[Feishu identity]');
+      expect(leadingIdentity(content)).toContain('类型：群聊');
     });
 
     it('respects the chat allowlist', async () => {
@@ -2108,11 +2277,12 @@ describe('UX state machine (bug 2 regression)', () => {
     expect(detailSent).toBeDefined();
     const afterDetails = h.transport.updatedCards.at(-1);
     expect(h.transport.updatedCards.length).toBe(beforeDetails + 1);
-    // The reasserted streaming card is still the EXPANDED one.
+    // The reasserted streaming card is still the EXPANDED one — no folded
+    // line on it.
     expect(afterDetails?.elements.some((el) => el.tag === 'column_set')).toBe(true);
     expect(
       afterDetails?.elements.some(
-        (el) => el.tag === 'markdown' && 'content' in el && el.content === 'bash',
+        (el) => el.tag === 'markdown' && 'content' in el && el.content === '🔧 Bash · ls',
       ),
     ).toBe(false);
   });
@@ -2132,7 +2302,9 @@ describe('UX state machine (bug 2 regression)', () => {
     expect(
       h.transport.updatedCards
         .at(-1)
-        ?.elements.some((el) => el.tag === 'markdown' && 'content' in el && el.content === 'bash'),
+        ?.elements.some(
+          (el) => el.tag === 'markdown' && 'content' in el && el.content === '🔧 Bash · ls',
+        ),
     ).toBe(true);
     // Expand.
     await h.bridge.handleCardAction({
@@ -2169,7 +2341,9 @@ describe('UX state machine (bug 2 regression)', () => {
     expect(
       h.transport.updatedCards
         .at(-1)
-        ?.elements.some((el) => el.tag === 'markdown' && 'content' in el && el.content === 'bash'),
+        ?.elements.some(
+          (el) => el.tag === 'markdown' && 'content' in el && el.content === '🔧 Bash · ls',
+        ),
     ).toBe(true);
   });
 });

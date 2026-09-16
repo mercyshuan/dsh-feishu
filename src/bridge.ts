@@ -14,6 +14,7 @@
  * @module @dsh-feishu/dsh-feishu/bridge
  */
 
+import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import {
@@ -53,6 +54,7 @@ import type {
   InboundAttachment,
   QuotedMessage,
 } from './feishu/types.js';
+import { IdentityAliasStore, IDENTITY_PREFIX, identityBlockText } from './identity-aliases.js';
 import { readLogFile } from './log-file.js';
 import { MessageDeduplicator } from './message-dedup.js';
 import { parseModelArg } from './model-args.js';
@@ -565,6 +567,21 @@ export interface BridgeOptions {
    * directories. Empty means `/repo` lists nothing (use `/cd <path>`).
    */
   readonly repoRoots?: readonly string[];
+  /**
+   * Absolute path of the local identity alias table (open id → person), the
+   * file the inbound identity block resolves against. Default
+   * `<dataDir>/identity-aliases.json`; the file is hot-reloaded by
+   * `mtimeMs`/size, so the agent may rewrite it mid-conversation (see
+   * `identity-aliases.ts`).
+   */
+  readonly identityAliasesFile?: string;
+  /**
+   * Whether to inject the inbound identity block (who is speaking — see
+   * {@link Bridge.identityBlock}). Default `true`; `false` disables the
+   * injection entirely, leaving every other behavior unchanged (the
+   * diagnostic / rollback switch).
+   */
+  readonly identityInjection?: boolean;
 }
 
 /** Whether a group is a 1-person-1-bot solo group (mention gate relaxation). */
@@ -588,11 +605,15 @@ function stripMentions(text: string): string {
 /**
  * The user-visible text of one queued message (message-queue): the joined
  * `text` blocks of its content, used for the queue-card row preview and the
- * edit default. Empty when a message carries only non-text blocks.
+ * edit default. Empty when a message carries only non-text blocks. The
+ * injected identity block is agent-facing metadata, not the user's own words,
+ * so it is left out — a queue card (and the edit form seeded from it) shows
+ * precisely what the user typed.
  */
 function queueMessageText(message: { readonly content: readonly ContentBlock[] }): string {
   return message.content
     .filter((block) => block.type === 'text')
+    .filter((block) => !block.text.startsWith(IDENTITY_PREFIX))
     .map((block) => block.text)
     .join('\n');
 }
@@ -680,6 +701,13 @@ export class Bridge {
    * persisted: a restart drops queued messages (accepted trade-off).
    */
   private readonly queued = new Map<string, QueueCardEntry[]>();
+  /**
+   * The local open-id → person alias table the inbound identity block
+   * resolves against (inbound identity injection). Hot-reloaded: the file is
+   * re-read whenever its `mtimeMs`/size changes, so an identity the agent
+   * registers mid-conversation takes effect on the next message.
+   */
+  private readonly identityAliases: IdentityAliasStore;
 
   /**
    * The user to proactively @ for a chat: the last accepted sender, only in
@@ -718,6 +746,7 @@ export class Bridge {
     this.streaming = new StreamingCardController(this.streamingHost());
     this.panel = new PanelController(this.panelHost());
     this.interactions = new InteractionCardController(this.interactionHost());
+    this.identityAliases = new IdentityAliasStore(this.identityAliasesPath(), options.logger);
     options.transport.onMessage((message) => {
       void this.handleMessage(message).catch((error: unknown) => {
         options.logger.error(`feishu message handling failed: ${String(error)}`);
@@ -2188,21 +2217,67 @@ export class Bridge {
   }
 
   /**
+   * The resolved identity alias-table path: the explicit option when the host
+   * configured one, else `<dataDir>/identity-aliases.json` (derived, never
+   * hard-coded — `dataDir` follows the deployment's `DSH_HOME`).
+   * @returns the absolute alias-table path.
+   */
+  private identityAliasesPath(): string {
+    return this.options.identityAliasesFile ?? join(this.options.dataDir, 'identity-aliases.json');
+  }
+
+  /**
+   * The agent-visible identity block for one inbound message: WHO is speaking
+   * to the agent right now.
+   *
+   * Feishu's message event carries only the sender's open id (no display
+   * name), so the block resolves it against the local alias table and states
+   * the result explicitly — an unregistered sender is reported as UNKNOWN
+   * (with the table's path, so the agent can register the person) rather than
+   * silently presenting a bare `ou_…` the agent would have to guess about.
+   * @param message - the normalized inbound message.
+   * @returns the identity content block, or `undefined` when injection is off.
+   */
+  private identityBlock(message: FeishuMessage): ContentBlock | undefined {
+    if (this.options.identityInjection === false) return undefined;
+    const alias = this.identityAliases.lookup(message.senderOpenId);
+    this.options.logger.debug(
+      `inbound identity ${message.messageId}: sender=${message.senderOpenId} ` +
+        `chat=${message.chatId} ${message.chatType} alias=${alias === undefined ? 'unknown' : alias.name}`,
+    );
+    return {
+      type: 'text',
+      text: identityBlockText({
+        senderOpenId: message.senderOpenId,
+        chatId: message.chatId,
+        chatType: message.chatType,
+        alias,
+        aliasesFile: this.identityAliases.path(),
+      }),
+    };
+  }
+
+  /**
    * Build the agent-visible content blocks for one inbound message. Text
-   * messages pass through unchanged. A reply/quote contributes the quoted
-   * message's own content FIRST (the user's request is about it, so it is
-   * part of the request — Feishu ships only the parent id and the transport
-   * resolved the body). Image attachments are downloaded and committed
-   * through the attachment seam, then injected as `image` content blocks;
-   * file attachments post a receipt card and contribute a file-name note.
-   * Failures notice loudly and degrade to text-only — the message is never
-   * silently dropped.
+   * messages pass through unchanged. The identity block comes FIRST (who is
+   * speaking — it frames everything after it). A reply/quote contributes the
+   * quoted message's own content next (the user's request is about it, so it
+   * is part of the request — Feishu ships only the parent id and the
+   * transport resolved the body). Image attachments are downloaded and
+   * committed through the attachment seam, then injected as `image` content
+   * blocks; file attachments post a receipt card and contribute a file-name
+   * note. Failures notice loudly and degrade to text-only — the message is
+   * never silently dropped.
    * @param message - the normalized inbound message.
    * @returns the content blocks for the agent's user message.
    */
   private async inboundContent(message: FeishuMessage): Promise<ContentBlock[]> {
     const blocks: ContentBlock[] = [];
-    // The quote comes first: it is the context the request refers to.
+    // The identity block is first and always present (identity injection): the
+    // agent must know who it is answering before it reads the request itself.
+    const identity = this.identityBlock(message);
+    if (identity !== undefined) blocks.push(identity);
+    // The quote comes next: it is the context the request refers to.
     if (message.quoted !== undefined) {
       blocks.push(...(await this.quotedContent(message, message.quoted)));
     }

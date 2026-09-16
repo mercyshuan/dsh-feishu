@@ -136,6 +136,20 @@ export interface Config {
     readonly error?: string;
     readonly stopped?: string;
   };
+  /**
+   * Absolute path of the local identity alias table (open id → person) the
+   * inbound identity block resolves against. Default
+   * `<dataDir>/identity-aliases.json` — the file is hot-reloaded by
+   * `mtimeMs`/size, so the agent may rewrite it while a chat is live.
+   */
+  readonly identityAliasesFile?: string;
+  /**
+   * Whether to inject the inbound identity block that tells the agent who is
+   * speaking (a `[Feishu identity]` line naming the person registered for the
+   * sender's open id, plus the standing "answer as them" guidance). Default
+   * `true`; `false` disables the injection entirely (diagnostic / rollback).
+   */
+  readonly identityInjection?: boolean;
 }
 
 /** Validated plugin configuration (schemastery schema). */
@@ -165,6 +179,8 @@ export const Config: z<Config> = z.object({
       stopped: z.string().required(false),
     })
     .required(false),
+  identityAliasesFile: z.string().required(false),
+  identityInjection: z.boolean().required(false),
 });
 
 /** Resolved credentials, or `undefined` when either value is missing. */
@@ -542,9 +558,17 @@ export function apply(ctx: Context, config: Config, deps: ApplyDeps = {}): void 
   ctx.logger.info(`[feishu] starting surface for app ${credentials.appId}`);
 
   const dataDir = config.dataDir ?? defaultDataDir();
+  // The identity alias table lives beside the rest of the surface state; the
+  // path is DERIVED from dataDir (never hard-coded) so a deployment that moves
+  // DSH_HOME keeps resolution and the agent's registration hint in sync.
+  const identityAliasesFile = config.identityAliasesFile ?? join(dataDir, 'identity-aliases.json');
+  const identityInjection = config.identityInjection ?? true;
   const sessionMap = new SessionMap(join(dataDir, 'session-map.json'), undefined, logger);
   sessionMap.load();
   logger.debug(`[feishu] dataDir=${dataDir}`);
+  logger.debug(
+    `[feishu] identity injection=${identityInjection ? 'on' : 'off'} aliasesFile=${identityAliasesFile}`,
+  );
   const allowedUsers = resolveAllowedUsers(config);
   const allowedChats = resolveAllowedChats(config);
   const groupMentionMode = resolveGroupMentionMode(config);
@@ -656,6 +680,8 @@ export function apply(ctx: Context, config: Config, deps: ApplyDeps = {}): void 
       ? { requireWorkingDir: config.requireWorkingDir }
       : {}),
     ...(config.reactions !== undefined ? { reactions: config.reactions } : {}),
+    identityAliasesFile,
+    identityInjection,
     executeCommand: (agent, line) => executeDshCommand(ctx, agent, line),
     listSessions: () => listSessions(ctx),
     readSession: (sessionId) => {
