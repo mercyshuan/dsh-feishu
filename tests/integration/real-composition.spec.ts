@@ -526,12 +526,15 @@ describe.skipIf(!integrationReady)('real-composition integration', () => {
       );
 
       // The streaming card is the first card sent (message id mem-1).
-      // Collapsed by default → the sequence line 'think → bash'.
+      // Collapsed by default → the folded line carries the current thinking.
       const patches = readOutbox().filter((r) => r.kind === 'patch');
       const finalCard = patches.at(-1)?.card;
       expect(
         finalCard?.elements.some(
-          (el) => el.tag === 'markdown' && 'content' in el && el.content === 'think → bash',
+          (el) =>
+            el.tag === 'markdown' &&
+            'content' in el &&
+            el.content === '☁️ Let me check the files.',
         ),
       ).toBe(true);
 
@@ -607,7 +610,7 @@ describe.skipIf(!integrationReady)('real-composition integration', () => {
         false,
       );
 
-      // Collapse again → back to the sequence line (same live card id).
+      // Collapse again → back to the folded thinking line (same live card id).
       writeAction({
         messageId: streamingCardMessageId(),
         chatId,
@@ -621,7 +624,10 @@ describe.skipIf(!integrationReady)('real-composition integration', () => {
           const last = all.at(-1)?.card;
           return (
             last?.elements.some(
-              (el) => el.tag === 'markdown' && 'content' in el && el.content === 'think → bash',
+              (el) =>
+                el.tag === 'markdown' &&
+                'content' in el &&
+                el.content === '☁️ Let me check the files.',
             ) === true
           );
         },

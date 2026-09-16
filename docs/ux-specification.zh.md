@@ -21,7 +21,13 @@
 3. **执行状态** —— 工作中显示 markdown 行 `**… working**` / `**⏹ Stopping…**`（可见进度）；终态时显示安静的 `note`（`✅ Done` / `⏹ Stopped` / `⚠️ Turn ended with an error`）—— 头部模板颜色已承载语义（见 1.4）。
 4. **按钮区** —— 两行（第 3.1 节）：先是状态操作，再是行视图切换。
 
-卡片**默认折叠**：行序列被替换为一行 `think → bash → read → …`（完整序列，绝不截断 —— 用户指令），按钮区增加 `▸ Expand`。
+卡片**默认折叠**：行序列被替换为一行**当前思考内容** —— 最新一条非空推理块
+压成单行、只保留尾部（超过 `MAX_COLLAPSED_THINK_CHARS` 时前缀 `…`）；当该回合
+没有任何推理文本时（模型不输出思考，或直接开始调工具），回退为最新一行的行文本，
+折叠态绝不会空白。按钮区增加 `▸ Expand`。
+
+> 取代了此前的行名序列 `think → bash → read → …`（用户反馈）：一列工具名只说
+> 明跑过哪些工具，不说明模型在想什么。
 
 ### 1.2 卡片状态机（单一权威状态）
 
@@ -41,7 +47,7 @@ done|stopped|error --any action--->  same (state unchanged; card re-synced)
 - **流式输出**：会话事件变更 working 状态并调用 `syncCard`（经由 streaming manager）。
 - **turn/end**：`completed` → done，`aborted`（用户 Stop）→ **stopped**，`error` → error。被中止的回合必须显示 **Stopped**，绝不能是 Done（DSH web `message.stopped`；用户报告）。`finalize` 冲刷终态渲染。状态保留在 map 中（rows/content 为 ⋯ 按钮和后续重新同步而保留）。
 - **卡片操作** 变更状态（toggle 翻转 `collapsed`）或不变更，然后**总是**调用 `syncCard` —— 唯一的渲染路径。已完成卡片被原地重新 patch，通过 macrotask 延迟，使回调 ACK 先到达（botmux 规则：否则 Lark 可能恢复点击前的卡片 —— 这是"reverts to working"类 bug 的根源）。
-- **折叠**：`collapsed` 是状态的一部分；`▸ Expand`/`▾ Collapse` 翻转它。折叠期间序列行持续流式更新（每次同步时根据 rows 重新计算）。新回合重置为折叠。
+- **折叠**：`collapsed` 是状态的一部分；`▸ Expand`/`▾ Collapse` 翻转它。折叠期间思考行持续流式更新（每次同步时根据 rows 重新计算最新推理文本）。新回合重置为折叠。
 - **compaction 不是回合**（用户报告）：`/compact` 运行
   `compaction/start → summary → end` 事务，**没有** `turn/end`，因此
   流式卡片控制器掌管 compaction 卡的生命周期——`compaction/start` 立即打开
@@ -195,7 +201,7 @@ done|stopped|error --any action--->  same (state unchanged; card re-synced)
 
 ## 7. 验收清单（在宣布某 UX 部分完成前执行）
 
-1. 卡片默认折叠；折叠期间序列持续流式更新。
+1. 卡片默认折叠；折叠期间当前思考行持续流式更新。
 2. 打开行详情绝不会折叠流式卡片，也不会将其重新渲染到过期状态（toggle 位不变；重新断言被延迟）。
 3. 卡片操作 ACK `{}`（绝不返回 `undefined`）；卡片 patch 延迟到回调之外。
 4. 工具 summary 绝不为长命令显示原始 JSON 包裹。
@@ -939,7 +945,8 @@ message, feishu }>>`，使每项的专属卡在状态变化时**原地**更新�
 
 **流式 trace（steering 行）** —— 当流式卡收到被插话消息的 `user/message` 事件
 （source kind `user`，由 `agent.steer` 在 turn 中途注入）时，控制器在 trace 中
-追加一个 `{ kind: 'steering', id, text }` 行。折叠时只显示 `steer`；展开时显示
+追加一个 `{ kind: 'steering', id, text }` 行。折叠时显示当前思考内容（该回合
+没有推理文本时回退为最新一行的行文本）；展开时显示
 完整被插话的消息文本——用户总能看见自己插话的那条消息被插在哪里。
 
 **失败模式**：

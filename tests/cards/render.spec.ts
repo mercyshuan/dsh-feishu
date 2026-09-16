@@ -19,7 +19,8 @@ import {
   buildRepoPickedCard,
   buildRepoPickerCard,
   buildRowDetailsCard,
-  collapseSequence,
+  collapseThought,
+  MAX_COLLAPSED_THINK_CHARS,
   PANEL_PAGE_SIZE,
   type PanelCommand,
   panelPages,
@@ -131,63 +132,57 @@ describe('rowLine', () => {
   });
 });
 
-describe('collapseSequence', () => {
-  it('joins think and tool names with ->', () => {
-    const rows = [
-      { kind: 'think' as const, id: 't1', text: '', settled: false },
-      {
-        kind: 'tool' as const,
-        id: 'c1',
-        name: 'bash',
-        status: 'done' as const,
-        summary: '',
-        args: '',
-        result: '',
-      },
-      {
-        kind: 'tool' as const,
-        id: 'c2',
-        name: 'read',
-        status: 'done' as const,
-        summary: '',
-        args: '',
-        result: '',
-      },
-    ];
-    expect(collapseSequence(rows)).toBe('think → bash → read');
+describe('collapseThought', () => {
+  const think = (id: string, text: string, settled = false) =>
+    ({ kind: 'think' as const, id, text, settled });
+  const tool = (id: string, name: string, summary = '', status: 'done' | 'running' = 'done') => ({
+    kind: 'tool' as const,
+    id,
+    name,
+    status,
+    summary,
+    args: '',
+    result: '',
   });
 
-  it('reads a steering row as steer in the sequence', () => {
+  it('shows the newest reasoning text, not the tool-name trail (feedback)', () => {
     const rows = [
-      { kind: 'think' as const, id: 't1', text: '', settled: false },
-      { kind: 'steering' as const, id: 'm1', text: 'rebuild the frontend' },
-      {
-        kind: 'tool' as const,
-        id: 'c1',
-        name: 'bash',
-        status: 'done' as const,
-        summary: '',
-        args: '',
-        result: '',
-      },
+      think('t1', 'first thought', true),
+      tool('c1', 'read_image', 'shot.png'),
+      think('t2', 'second thought'),
+      tool('c2', 'pwsh', 'Get-ChildItem'),
     ];
-    expect(collapseSequence(rows)).toBe('think → steer → bash');
+    expect(collapseThought(rows)).toBe('☁️ second thought');
   });
 
-  it('shows the full sequence — no truncation (feedback)', () => {
-    const rows = Array.from({ length: 15 }, (_, i) => ({
-      kind: 'tool' as const,
-      id: `c${i}`,
-      name: `t${i}`,
-      status: 'done' as const,
-      summary: '',
-      args: '',
-      result: '',
-    }));
-    const seq = collapseSequence(rows);
-    expect(seq).toBe(
-      't0 → t1 → t2 → t3 → t4 → t5 → t6 → t7 → t8 → t9 → t10 → t11 → t12 → t13 → t14',
+  it('keeps the tail of a long block, on one line', () => {
+    const text = `${'x'.repeat(400)}TAIL`;
+    const line = collapseThought([think('t1', text)]);
+    expect(line.startsWith('☁️ …')).toBe(true);
+    expect(line.endsWith('TAIL')).toBe(true);
+    // `☁️ ` + `…` + the clipped tail — nothing longer.
+    expect(line.length).toBe(3 + 1 + MAX_COLLAPSED_THINK_CHARS);
+    expect(line).not.toContain('\n');
+  });
+
+  it('flattens newlines and runs of whitespace onto one line', () => {
+    expect(collapseThought([think('t1', 'line one\n\n  line two\t')])).toBe(
+      '☁️ line one line two',
     );
+  });
+
+  it('skips reasoning rows that carry no text yet', () => {
+    const rows = [think('t1', ''), tool('c1', 'bash', 'ls', 'running')];
+    expect(collapseThought(rows)).toBe('🔧 Bash · ls');
+  });
+
+  it('falls back to the latest row line when the turn has no reasoning at all', () => {
+    const rows = [tool('c1', 'bash', 'ls'), tool('c2', 'read', 'a.ts')];
+    expect(collapseThought(rows)).toBe('✅ Read · a.ts');
+  });
+
+  it('returns an empty line for no rows', () => {
+    expect(collapseThought([])).toBe('');
   });
 });
 
@@ -286,12 +281,12 @@ describe('buildCard', () => {
     expect(rowButton(rows[1])?.value).toEqual({ kind: 'row-details', id: 'c1' });
   });
 
-  it('collapsed mode renders one sequence line with an expand toggle', () => {
+  it('collapsed mode renders the current thinking with an expand toggle', () => {
     const card = buildCard({
       title: 'T',
       content: 'done',
       rows: [
-        { kind: 'think', id: 't1', text: 'hmm', settled: true },
+        { kind: 'think', id: 't1', text: 'weighing the options', settled: true },
         {
           kind: 'tool',
           id: 'c1',
@@ -314,11 +309,11 @@ describe('buildCard', () => {
       collapsed: true,
       status: 'done',
     });
-    const sequence = card.elements.find(
+    const thought = card.elements.find(
       (el): el is Extract<CardElement, { tag: 'markdown' }> =>
-        el.tag === 'markdown' && el.content.includes(' → '),
+        el.tag === 'markdown' && el.content.startsWith('☁️ '),
     );
-    expect(sequence?.content).toBe('think → bash → read');
+    expect(thought?.content).toBe('☁️ weighing the options');
     expect(card.elements.filter((el) => el.tag === 'column_set')).toHaveLength(0);
     const actions = card.elements.filter((el) => el.tag === 'action');
     expect(buttonLabels(actions[1])).toContain('▸ Expand');

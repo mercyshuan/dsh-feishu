@@ -34,8 +34,6 @@ export const enMessages = {
   // ── Card rows + stats line ──────────────────────────────────────────────
   'card.row.thinking': '☁️ Think · Thinking',
   'card.row.steerLine': '💬 Steer · {preview}',
-  'card.sequence.think': 'think',
-  'card.sequence.steer': 'steer',
   'card.stats.turns': '{count} turns',
   'card.stats.steps': '{count} steps',
   'card.stats.tools': '{count} tools',

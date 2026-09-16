@@ -34,8 +34,6 @@ export const zhMessages: Record<MessageKey, string> = {
   // ── Card rows + stats line ──────────────────────────────────────────────
   'card.row.thinking': '☁️ 思考 · 思考中',
   'card.row.steerLine': '💬 插话 · {preview}',
-  'card.sequence.think': '思考',
-  'card.sequence.steer': '插话',
   'card.stats.turns': '{count} 轮',
   'card.stats.steps': '{count} 步',
   'card.stats.tools': '{count} 次工具',

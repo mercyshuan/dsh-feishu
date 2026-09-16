@@ -40,8 +40,16 @@ user feedback rounds 2–5.
    view toggle.
 
 The card is **collapsed by default**: the row sequence is replaced by one
-line `think → bash → read → …` (full sequence, never truncated — user
-directive), and the button area gains `▸ Expand`.
+line of the model's **CURRENT thinking** — the newest non-empty reasoning
+block, flattened onto one line and clipped to its tail
+(`MAX_COLLAPSED_THINK_CHARS`, prefixed `…` when clipped). When the turn has
+no reasoning text at all (a model that emits none, or a turn that went
+straight to tools), the line falls back to the latest row's own line so the
+folded card still says what is happening. The button area gains `▸ Expand`.
+
+> Replaced the earlier row-name trail `think → bash → read → …` (user
+> feedback): a column of tool names says which tools ran, not what the model
+> is thinking.
 
 ### 1.2 Card state machine (single authoritative state)
 
@@ -77,8 +85,9 @@ done|stopped|error --any action--->  same (state unchanged; card re-synced)
   first (botmux rule: Lark can otherwise restore the pre-click card — the
   root of the "reverts to working" bugs).
 - **Collapsed**: `collapsed` is part of the state; `▸ Expand`/`▾ Collapse`
-  flips it. While collapsed, the sequence line streams (recomputed from
-  rows on every sync). A new turn resets to collapsed.
+  flips it. While collapsed, the thinking line streams (recomputed from the
+  rows — the newest reasoning text — on every sync). A new turn resets to
+  collapsed.
 - **Compaction is not a turn** (user report): `/compact` runs a
   `compaction/start → summary → end` transaction with no `turn/end`, so the
   the streaming-card controller handles the compaction card lifecycle — `compaction/start`
@@ -271,7 +280,7 @@ rounds 1–5.
 
 ## 7. Acceptance checklist (run before declaring a UX part done)
 
-1. Cards start collapsed; the sequence streams while collapsed.
+1. Cards start collapsed; the current-thinking line streams while collapsed.
 2. Opening row details never collapses or re-renders the streaming card to
    a stale state (toggle bit untouched; re-assertion deferred).
 3. Card actions ACK `{}` (never `undefined`); card patches are deferred out
@@ -1638,8 +1647,10 @@ a new card; the streaming trace adds a `steering` row where it was injected
 **Streaming trace (steering row)** — when the streaming card receives the
 steered message's `user/message` event (source kind `user`, injected mid-turn
 by `agent.steer`), the controller adds a `{ kind: 'steering', id, text }` row
-to the trace. Collapsed shows just `steer`; expanded shows the full steered
-message text — the user always sees where their steered message was inserted.
+to the trace. Collapsed shows the current thinking (or, with no reasoning
+text in the turn, the steering row's own line); expanded shows the full
+steered message text — the user always sees where their steered message was
+inserted.
 
 **Failure modes**:
 - No inbox (agent absent / `agent.inbox` unavailable): the message is

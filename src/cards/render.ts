@@ -6,8 +6,10 @@
  * Layout mirrors DSH web (feedback-driven): a chronological sequence of
  * one-line rows — think rows and tool rows — each with an expand button,
  * then the complete output at the bottom, then the execution status and the
- * button area. Every row carries a stable id so a button tap can open that
- * exact row's details card.
+ * button area. Folded (the default), that sequence collapses to one line of
+ * the model's CURRENT thinking ({@link collapseThought}) — not the tool-name
+ * trail (user feedback). Every row carries a stable id so a button tap can
+ * open that exact row's details card.
  *
  * @module @dsh-feishu/dsh-feishu/cards/render
  */
@@ -77,7 +79,8 @@ export interface CardSnapshot {
   readonly rows: readonly TurnRow[];
   /** Session cwd, used to relativize workspace-rooted path summaries. */
   readonly cwd?: string;
-  /** Collapse the row sequence to one `think → tool → …` line. */
+  /** Fold the rows into one line of current thinking (see
+   *  {@link collapseThought}) instead of the chronological row list. */
   readonly collapsed?: boolean;
   /** The user pressed Stop; show an in-progress Stopping state. */
   readonly stopRequested?: boolean;
@@ -123,6 +126,10 @@ export const MAX_CARD_CHARS = 60_000;
 
 /** Longest reasoning text kept per think row (the live line is one-liner). */
 export const MAX_THINK_CHARS = 2000;
+
+/** Longest reasoning snippet the folded card line shows (one line; the tail
+ *  of the newest block, prefixed with `…` when clipped). */
+export const MAX_COLLAPSED_THINK_CHARS = 300;
 
 /** Surface action payloads stamped on card buttons. */
 export type SurfaceAction =
@@ -446,17 +453,37 @@ export function rowLine(row: TurnRow): string {
 }
 
 /**
- * The minimal collapsed sequence for a turn: row names joined with
- * ` → ` (`think → bash → read`). Think rows read "think", tool rows read
- * their tool name. The full sequence is shown — no truncation.
+ * The folded card line: what the model is THINKING right now.
+ *
+ * It used to be the row-name trail (`think → read_image → think → pwsh → …`),
+ * which told the user which tools had run but nothing about the reasoning
+ * behind them (user feedback). Folded, the card now shows the newest
+ * non-empty reasoning block, clipped to its TAIL — the part being written
+ * right now — flattened onto one line (the live line must not grow into a
+ * paragraph, and a leading `#`/`>` in model text must not restyle the card,
+ * hence the `☁️ ` prefix).
+ *
+ * When there is no reasoning text at all (a model that emits none, or a turn
+ * that went straight to tools) it falls back to the latest row's own line, so
+ * the folded card still says what is happening instead of rendering empty.
+ *
+ * @param rows - the turn's chronological rows.
+ * @returns one line of markdown, or `''` when there is nothing to show.
  */
-export function collapseSequence(rows: readonly TurnRow[]): string {
-  const names = rows.map((row) => {
-    if (row.kind === 'think') return t('card.sequence.think');
-    if (row.kind === 'steering') return t('card.sequence.steer');
-    return row.name;
-  });
-  return names.map(stripAngleBrackets).join(' → ');
+export function collapseThought(rows: readonly TurnRow[]): string {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (row?.kind !== 'think') continue;
+    const oneLine = row.text.replace(/\s+/g, ' ').trim();
+    if (oneLine === '') continue;
+    const clipped =
+      oneLine.length <= MAX_COLLAPSED_THINK_CHARS
+        ? oneLine
+        : `…${oneLine.slice(-MAX_COLLAPSED_THINK_CHARS)}`;
+    return stripAngleBrackets(`☁️ ${clipped}`);
+  }
+  const last = rows[rows.length - 1];
+  return last === undefined ? '' : stripAngleBrackets(rowLine(last));
 }
 
 /** One card row: the line text plus its expand button (opens row details). */
@@ -560,8 +587,9 @@ export function buildCard(snapshot: CardSnapshot): CardJson {
   const elements: CardElement[] = [];
   const collapsed = snapshot.collapsed ?? false;
   if (collapsed && snapshot.rows.length > 0) {
-    // The minimal sequence, one line: `think → bash → read → …`.
-    elements.push({ tag: 'markdown', content: collapseSequence(snapshot.rows) });
+    // Folded: the current thinking, one line (never the tool-name trail).
+    const thought = collapseThought(snapshot.rows);
+    if (thought !== '') elements.push({ tag: 'markdown', content: thought });
   } else {
     for (const row of snapshot.rows) {
       elements.push(rowElement(row));
