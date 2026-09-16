@@ -20,6 +20,19 @@
     - id: tool-ask-user
       name: '@deepseek-ai/dsh-tool-ask-user'
 
+    # Host-owned opt-in sampled when an agent preset mounts its delegation
+    # tools. The web surface mounts this row through the `dsh-web-app` bundle;
+    # dsh-base does not, and a Feishu profile is dsh-base + this bundle. The
+    # shipped `standard*` presets set `modelSelectionSettings: true` on their
+    # `tool-subagent` row, and that switch does NOT degrade: tool-subagent
+    # throws at mount time ("`modelSelectionSettings` requires
+    # @deepseek-ai/dsh-tool-subagent/model-selection-settings in the Host
+    # scope"), failing the WHOLE preset — every Feishu session created under
+    # such a preset comes back unusable and its card stays on "working".
+    # Mounting the row here keeps the shared presets mountable from Feishu.
+    - id: subagent-model-selection-settings
+      name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
+
     # Agent-scoped durable reminders (after / at / every): the model creates
     # them in chat ("remind me in 5 minutes"), and a fired reminder wakes the
     # agent, whose response the surface renders as an '⏰ Reminder' card

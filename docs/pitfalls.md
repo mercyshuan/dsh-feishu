@@ -314,6 +314,26 @@ The harness sandbox (and this checkout's environment) has specific rules:
   `tests/integration/real-composition.spec.ts` →
   "fresh sessions run the saved default model, not the dsh-base entry (#62)".
 
+## Agent presets that require a host-scope service
+
+- A shared agent preset fails to **mount** — not merely to lose one tool —
+  when a row it composes needs a host-scope service the profile never mounts.
+  The shipped `standard*` presets set `modelSelectionSettings: true` on their
+  `tool-subagent` row, and `@deepseek-ai/dsh-tool-subagent` does not degrade on
+  that switch: it throws at mount time ("`modelSelectionSettings` requires
+  @deepseek-ai/dsh-tool-subagent/model-selection-settings in the Host scope").
+  Only `@deepseek-ai/dsh-web-app/cordis.patch.yml` mounts that row, so a Feishu
+  profile (dsh-base + this bundle) mounted the same preset fine on the web
+  surface and failed here: `preset "…" failed to mount`, the session came back
+  `unusable`, and the chat card stuck on "working" with no reply. This bundle
+  now inserts the row itself — the parity that keeps shared presets mountable
+  from Feishu. When a preset row is added, check whether the services it needs
+  live in a host bundle this profile does not include.
+- It surfaces only when a preset is MOUNTED, i.e. on session create or rebind —
+  never on resume of a live session. An installation can therefore serve for
+  days and break only after a restart or a lost session, which is why it reads
+  as "the bot stopped answering" rather than as a configuration error.
+
 ## Integration-test traps
 
 - The integration suite shares the real profile (`_dev/dsh-home`). A test

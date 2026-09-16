@@ -275,6 +275,23 @@ harness 沙箱（以及本 checkout 的环境）有一些特定规则：
   两个用例）与 `tests/integration/real-composition.spec.ts` →
   "fresh sessions run the saved default model, not the dsh-base entry (#62)"。
 
+## 要求宿主层服务的 agent preset
+
+- 当 preset 组合的某一行需要宿主层服务、而该 profile 从未挂载它时，共享 agent
+  preset 会**挂载失败**（不是少一个工具那么简单）。仓库自带的 `standard*` preset
+  在其 `tool-subagent` 行上设置了 `modelSelectionSettings: true`，而
+  `@deepseek-ai/dsh-tool-subagent` 对该开关**不做降级**：挂载即抛
+  "`modelSelectionSettings` requires
+  @deepseek-ai/dsh-tool-subagent/model-selection-settings in the Host scope"。
+  只有 `@deepseek-ai/dsh-web-app/cordis.patch.yml` 挂载了该行，因此飞书 profile
+  （dsh-base + 本 bundle）里同一个 preset 在 web 端正常、在这里失败：报
+  `preset "…" failed to mount`、会话 `unusable`，卡片永远停在"处理中"且没有回复。
+  本 bundle 现自行插入该行——这正是让共享 preset 在飞书侧可挂载的对等行。今后
+  新增 preset 行时，先确认它依赖的服务是否位于本 profile 未包含的宿主 bundle 中。
+- 它只在 preset 被**挂载**时暴露，即会话创建或重绑时——活会话 resume 不会重新
+  挂载。所以一套安装可能连续工作数天，只在重启或会话丢失后才坏，症状因此表现为
+  "机器人不回复"而非配置错误。
+
 ## 集成测试陷阱
 
 - 集成测试套件共享真实 profile（`_dev/dsh-home`）。通过表面写入状态的
