@@ -292,6 +292,22 @@ harness 沙箱（以及本 checkout 的环境）有一些特定规则：
   挂载。所以一套安装可能连续工作数天，只在重启或会话丢失后才坏，症状因此表现为
   "机器人不回复"而非配置错误。
 
+## 助手流式增量已改走进程内瞬时帧（dsh 0.1.5）
+
+- dsh 0.1.5 的 core **不再**把 assistant 的增量作为落库事件 `assistant/chunk`
+  追加，改由 agent loop 发布**进程内瞬时帧** `agent/assistant-stream`
+  （`dsh-agent-loop`：`dispatch.emit('agent/assistant-stream', { frame })`，其中
+  `frame.chunk` 就是过去那条落库事件携带的 `StreamChunk`）。只订阅
+  `session/event` 的表面在 0.1.5 下**收不到任何流式增量**：没有
+  `reasoning-delta`，思考行就从不建立，折叠卡片退化为 `collapseThought` 的
+  末行回退（工具轨迹）——用户看到的是"思考内容没了、只剩工具的简短记录"，
+  正文也不再逐字，而是一次性出现。
+- 本 bundle 现在**同时**订阅两条通道：落库事件（0.1.2）与 dispatch 帧
+  （0.1.5），把帧里的 `chunk` 折回**同一条**控制器分支。两者靠落库事件携带的
+  已提交 `seq` 区分，因此即便某个 core 两条都发也不会把同一段文本折叠两次。
+- 这种退化是**静默**的：不报错、正文照出，只是少了思考行。核心升级后请主动
+  复核宿主事件契约，别等用户来报。
+
 ## 集成测试陷阱
 
 - 集成测试套件共享真实 profile（`_dev/dsh-home`）。通过表面写入状态的

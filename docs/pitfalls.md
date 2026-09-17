@@ -334,6 +334,26 @@ The harness sandbox (and this checkout's environment) has specific rules:
   days and break only after a restart or a lost session, which is why it reads
   as "the bot stopped answering" rather than as a configuration error.
 
+## Assistant-stream deltas moved to a process-local frame (dsh 0.1.5)
+
+- A dsh 0.1.5 core no longer appends the incremental assistant deltas as the
+  durable `assistant/chunk` session event; the agent loop publishes them as
+  transient `agent/assistant-stream` dispatch frames instead
+  (`dsh-agent-loop`: `dispatch.emit('agent/assistant-stream', { frame })`, whose
+  `frame.chunk` is the very `StreamChunk` the durable event used to carry). A
+  surface subscribed only to `session/event` therefore receives **no stream at
+  all** on 0.1.5 — no `reasoning-delta`, so no think row is ever created and the
+  folded card falls back to `collapseThought`'s last-row line (the tool trail):
+  the user sees "thinking is gone, only the short tool lines remain", and the
+  answer appears in one piece instead of streaming.
+- This bundle now subscribes to BOTH channels — the durable event (0.1.2) and
+  the dispatch frame (0.1.5) — folding the frame's `chunk` back into the same
+  controller branch. The two are told apart by the committed `seq` a durable
+  event carries, so a core publishing both cannot fold the same text twice.
+- The degradation is SILENT: nothing fails, the answer still renders, and only
+  the reasoning row goes missing. Re-check the host event contract after every
+  core upgrade rather than waiting for a report.
+
 ## Integration-test traps
 
 - The integration suite shares the real profile (`_dev/dsh-home`). A test
