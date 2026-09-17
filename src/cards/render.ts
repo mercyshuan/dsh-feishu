@@ -794,8 +794,14 @@ export interface PanelCommand {
  * on ONE first page — those mode commands are the ones users reach for, and a
  * palette that hides them behind a page flip reads as "the panel has no
  * preset" (user reports). The whole system block then keeps page 2.
+ *
+ * Raised to 11 for the `card` group (the skill-control card button): page 1
+ * was EXACTLY full at 10 (agent 5 + session 5) and a category block is never
+ * split, so without one more slot the card button could only ever land on
+ * page 2. With 11 the first page is agent + session + card and page 2 keeps
+ * its previous contents (chat + system).
  */
-export const PANEL_PAGE_SIZE = 10;
+export const PANEL_PAGE_SIZE = 11;
 
 /** A panel page entry: a category header or one command button. */
 export type PanelPageEntry =
@@ -857,6 +863,7 @@ function categoryLabel(category: string): string {
   // capitalized fallback so a future category still renders labeled.
   if (category === 'agent') return t('panel.category.agent');
   if (category === 'session') return t('panel.category.session');
+  if (category === 'card') return t('panel.category.card');
   if (category === 'chat') return t('panel.category.chat');
   if (category === 'system') return t('panel.category.system');
   const name =

@@ -39,9 +39,10 @@ export interface SurfaceCommand {
    * Panel category grouping. `agent` sits FIRST in the palette because these
    * commands choose HOW the session runs (model, permission preset, agent
    * preset, plan mode) rather than managing it — the most-reached-for group
-   * must not hide behind page 2.
+   * must not hide behind page 2. `card` follows `session`: it is the
+   * skill-control card group, and with the shipped set it closes page 1.
    */
-  readonly category: 'agent' | 'session' | 'chat' | 'system';
+  readonly category: 'agent' | 'session' | 'card' | 'chat' | 'system';
   /** Button label on the control panel; defaults to the command name. */
   readonly buttonLabel?: string;
   /**

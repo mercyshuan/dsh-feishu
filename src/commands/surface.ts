@@ -85,6 +85,7 @@ const COMMAND_HELP_KEYS: Readonly<Record<string, MessageKey>> = {
   panel: 'command.help.panel',
   log: 'command.help.log',
   group: 'command.help.group',
+  imagecard: 'command.help.imagecard',
   cancel: 'command.help.cancel',
   cd: 'command.help.cd',
   repo: 'command.help.repo',
@@ -181,6 +182,27 @@ export interface SurfaceCommandHost {
   liveAgent(chatId: string): Agent | undefined;
   /** Read the dsh-feishu log and ship it to the chat (`/log` + error-card button). */
   sendLog(chatId: string): Promise<CommandResult>;
+  /**
+   * Start one allowlisted `cardCommands` entry on behalf of a SURFACE action
+   * (the panel's card button, `/imagecard`), i.e. without an external card
+   * button to read `{form.*}` from. Absent when the deployment does not mount
+   * the command seam.
+   * @param name - the `cardCommands` entry name.
+   * @param args - extra argv for the command.
+   * @param context - `{chat}` / `{operator}` sources (no card, no form).
+   * @returns `{ok: true}` once the command started, or the refusal text.
+   */
+  readonly runCardCommand?:
+    | ((
+        name: string,
+        args: readonly string[],
+        context: {
+          readonly chatId: string;
+          readonly messageId?: string;
+          readonly operatorOpenId: string;
+        },
+      ) => { ok: true } | { ok: false; text: string })
+    | undefined;
 }
 
 /**
@@ -289,6 +311,27 @@ export function registerSurfaceCommands(commands: CommandRegistry, host: Surface
           text: t('command.error.groupCreateFailed', { detail: String(error) }),
         };
       }
+    },
+  });
+  commands.register({
+    name: 'imagecard',
+    description: 'Create an image-gen control card in this chat',
+    category: 'card',
+    buttonLabel: t('command.cmd.imagecard.label'),
+    handler: (invocation) => {
+      // No agent turn: this runs the allowlisted `cardCommands` entry, and the
+      // script itself posts the card (and starts the engine if needed).
+      const run = options.runCardCommand?.('image-gen-create', ['--chat', '{chat}'], {
+        chatId: invocation.chatId,
+        operatorOpenId: invocation.senderOpenId,
+      });
+      if (run === undefined) {
+        return { kind: 'error', text: t('command.error.cardCommandUnavailable') };
+      }
+      // Success is SILENT (`text: ''` = no result card, the surface convention):
+      // the freshly posted card IS the feedback, and an extra bubble would be
+      // noise.
+      return run.ok ? { kind: 'success', text: '' } : { kind: 'error', text: run.text };
     },
   });
   commands.register({

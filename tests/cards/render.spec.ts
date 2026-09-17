@@ -23,6 +23,7 @@ import {
   MAX_COLLAPSED_THINK_CHARS,
   PANEL_PAGE_SIZE,
   type PanelCommand,
+  type PanelPageEntry,
   panelPages,
   REPO_SELECT_MAX_OPTIONS,
   repoOptionLabel,
@@ -697,6 +698,51 @@ describe('panelPages', () => {
       ['session', 'a'],
       ['system', 'b', 'c', 'd'],
     ]);
+  });
+
+  it('closes the FIRST page with the card group (the shipped palette layout)', () => {
+    // The shipped set: agent(5) + session(5) exactly filled page 1 at the old
+    // page size, and a category block is never split — so the skill-control
+    // card group could only ever land on page 2. The page size was raised by
+    // exactly one so the new group ENDS page 1 and page 2 keeps its contents.
+    const shipped: PanelCommand[] = [
+      ...(
+        [
+          ['model', '🤖 Model'],
+          ['effort', '🧠 Effort'],
+          ['permission', '🔐 Permission'],
+          ['preset', '🧩 Agent preset'],
+          ['plan', '🗺️ Plan mode'],
+        ] as Array<[string, string]>
+      ).map(([name, buttonLabel]) => ({ name, buttonLabel, category: 'agent' })),
+      ...(
+        [
+          ['cancel', '⏹ Stop'],
+          ['cd', '📁 Change dir'],
+          ['repo', '📚 Pick project'],
+          ['sessions', '🗂️ Sessions'],
+          ['new', '➕ New chat'],
+        ] as Array<[string, string]>
+      ).map(([name, buttonLabel]) => ({ name, buttonLabel, category: 'session' })),
+      { name: 'imagecard', buttonLabel: '🎨 Image card', category: 'card' },
+      { name: 'group', buttonLabel: '👥 New group', category: 'chat' },
+      ...Array.from({ length: 9 }, (_, i) => ({
+        name: `sys${i}`,
+        buttonLabel: `S${i}`,
+        category: 'system',
+      })),
+    ];
+    const pages = panelPages(shipped);
+    const names = (page: readonly PanelPageEntry[]): string[] =>
+      page.filter((e) => e.type === 'button').map((e) => (e.type === 'button' ? e.name : ''));
+    const headers = (page: readonly PanelPageEntry[]): string[] =>
+      page.filter((e) => e.type === 'header').map((e) => (e.type === 'header' ? e.label : ''));
+    expect(headers(pages[0] ?? [])).toEqual(['agent', 'session', 'card']);
+    expect(names(pages[0] ?? []).at(-1)).toBe('imagecard');
+    expect(names(pages[0] ?? [])).toHaveLength(PANEL_PAGE_SIZE);
+    // Page 2 is unchanged from before the card group existed.
+    expect(headers(pages[1] ?? [])).toEqual(['chat', 'system']);
+    expect(names(pages[1] ?? [])).toHaveLength(10);
   });
 });
 

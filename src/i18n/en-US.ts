@@ -210,6 +210,7 @@ export const enMessages = {
   'panel.action.effortPickInvalid': 'No thinking depth was chosen.',
   'panel.category.agent': '🤖 Agent',
   'panel.category.session': '🧩 Session',
+  'panel.category.card': '🎨 Card',
   'panel.category.chat': '💬 Chat',
   'panel.category.system': '⚙️ System',
   'panel.view.unknownSession': '(unknown)',
@@ -262,6 +263,7 @@ export const enMessages = {
   'command.cmd.help.label': '❓ Help',
   'command.cmd.log.label': '📄 Export log',
   'command.cmd.group.label': '👥 New group',
+  'command.cmd.imagecard.label': '🎨 Image card',
   'command.cmd.cancel.label': '⏹ Stop turn',
   'command.cmd.cd.label': '📁 Change dir',
   'command.cmd.repo.label': '📚 Pick project',
@@ -290,6 +292,8 @@ export const enMessages = {
   'command.help.panel': 'Open the control panel card (all commands as buttons)',
   'command.help.log': 'Send the dsh-feishu log file to this chat',
   'command.help.group': 'Create a group chat with you and the bot',
+  'command.help.imagecard':
+    'Create/refresh an image-gen card in this chat (workflow, prompt, size, seed, count + generate / stop-engine buttons)',
   'command.help.cancel': 'Stop the current turn',
   'command.help.cd': 'Set this chat’s working directory (session restarts in it)',
   'command.help.repo':
@@ -467,4 +471,6 @@ export const enMessages = {
     '⏳ A card command ({name}) is already running in this chat — wait for it to finish.',
   'cardRun.invalid': '🚫 The card button payload is invalid: {detail}',
   'cardRun.failed': '🚫 Card command "{name}" could not start: {detail}',
+  'command.error.cardCommandUnavailable':
+    '🚫 The card-command seam is not available in this deployment (no cardCommands runner).',
 } as const;

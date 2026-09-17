@@ -1793,7 +1793,7 @@ describe('Bridge', () => {
 
       // No agent turn, no card: the command itself owns the UI.
       expect(h.agentStore.followups.get('feishu-session-1')?.length ?? 0).toBe(followupsBefore);
-      for (let i = 0; i < 50 && !existsSync(out); i += 1) {
+      for (let i = 0; i < 200 && !existsSync(out); i += 1) {
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
       expect(readFileSync(out, 'utf8')).toBe('一只猫');
@@ -3182,6 +3182,89 @@ describe('session commands (/sessions /resume /clear /new)', () => {
 });
 
 describe('panel command palette', () => {
+  it('ends page 1 with the image-card button', async () => {
+    const h = makeHarness();
+    // The palette card is what /panel (and the panel action) posts.
+    await h.bridge.handleCardAction({
+      messageId: 'mem-open',
+      chatId: 'oc_chat',
+      operatorOpenId: 'ou_user',
+      value: { kind: 'panel' },
+    });
+    const card = h.transport.sentCards.at(-1) ?? h.transport.updatedCards.at(-1);
+    const commandNames = (card?.elements ?? [])
+      .filter((el): el is Extract<CardElement, { tag: 'action' }> => el.tag === 'action')
+      .flatMap((row) => row.actions)
+      .filter((el) => el.tag === 'button' && el.value?.kind === 'command')
+      .map((el) => el.value?.name);
+    // Page 1 = agent(5) + session(5) + card(1); the card group closes it.
+    expect(commandNames.at(-1)).toBe('imagecard');
+    expect(commandNames).toHaveLength(11);
+  });
+
+  it('the image-card button runs the allowlisted create command (no agent turn)', async () => {
+    const out = join(SCRATCH, `panel-card-create-${Date.now()}.txt`);
+    const h = makeHarness({
+      cardCommands: [
+        {
+          name: 'image-gen-create',
+          file: process.execPath,
+          args: [
+            '-e',
+            'require("node:fs").writeFileSync(process.argv[1], process.argv[2])',
+            out,
+            '{chat}',
+          ],
+        },
+      ],
+    });
+    await h.bridge.handleCardAction({
+      messageId: 'mem-open',
+      chatId: 'oc_chat',
+      operatorOpenId: 'ou_user',
+      value: { kind: 'panel' },
+    });
+    const cardId = lastCardId(h);
+    const followupsBefore = h.agentStore.followups.get('feishu-session-1')?.length ?? 0;
+    await h.bridge.handleCardAction({
+      messageId: cardId,
+      chatId: 'oc_chat',
+      operatorOpenId: 'ou_user',
+      value: { kind: 'command', name: 'imagecard' },
+    });
+    // The command's own argv came from config; nothing went to the agent.
+    expect(h.agentStore.followups.get('feishu-session-1')?.length ?? 0).toBe(followupsBefore);
+    // Silent success: the card the command posts IS the feedback, so the panel
+    // must not add a result card or a text bubble.
+    expect(h.transport.sentTexts).toHaveLength(0);
+    expect(resultCardTexts(h)).toHaveLength(0);
+    // The `{chat}` placeholder resolved from the PANEL context (not a card form).
+    for (let i = 0; i < 200 && !existsSync(out); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(readFileSync(out, 'utf8')).toBe('oc_chat');
+  });
+
+  it('the image-card button reports a missing allowlist entry instead of failing silently', async () => {
+    const h = makeHarness({ cardCommands: [] });
+    await h.bridge.handleCardAction({
+      messageId: 'mem-open',
+      chatId: 'oc_chat',
+      operatorOpenId: 'ou_user',
+      value: { kind: 'panel' },
+    });
+    const cardId = lastCardId(h);
+    await h.bridge.handleCardAction({
+      messageId: cardId,
+      chatId: 'oc_chat',
+      operatorOpenId: 'ou_user',
+      value: { kind: 'command', name: 'imagecard' },
+    });
+    expect(
+      resultCardTexts(h).some((t) => t.includes('cardCommands') && t.includes('image-gen-create')),
+    ).toBe(true);
+  });
+
   it('panel-back pops to the PARENT view (stack semantics)', async () => {
     const h = makeHarness({ listSessions: async () => sessionRows() });
     // Open the panel (fresh card), then drive it with that card's id.

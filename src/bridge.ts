@@ -24,7 +24,13 @@ import {
   type UserMessage,
 } from '@deepseek-ai/dsh-llm';
 import type { SessionEvent } from '@deepseek-ai/dsh-session';
-import { CardCommandRunner, type CardCommandSpec, parseCardRunRequest } from './card-run.js';
+import {
+  CardCommandRunner,
+  type CardCommandSpec,
+  type CardRunContext,
+  type CardRunRequest,
+  parseCardRunRequest,
+} from './card-run.js';
 import {
   InteractionCardController,
   type InteractionCardHost,
@@ -1392,14 +1398,21 @@ export class Bridge {
   }
 
   /** The panel command palette: every surface command as a button, grouped
-   *  by category (agent → session → chat → system) so the palette reads as
-   *  sections regardless of registration order, and the group that chooses
-   *  HOW the session runs lands on the first page. */
+   *  by category (agent → session → card → chat → system) so the palette reads
+   *  as sections regardless of registration order, and the groups that choose
+   *  HOW the session runs — plus the skill-control card button — land on the
+   *  first page. */
   private panelCommands(): PanelCommand[] {
-    const categoryOrder = ['agent', 'session', 'chat', 'system'];
+    const categoryOrder = ['agent', 'session', 'card', 'chat', 'system'];
+    // An unknown category sorts LAST (not first): `indexOf` returns -1, which
+    // would otherwise float a new/foreign group to the top of the palette.
+    const rank = (category: string): number => {
+      const index = categoryOrder.indexOf(category);
+      return index === -1 ? categoryOrder.length : index;
+    };
     return [...this.commands.list()]
       .filter((command) => command.hiddenFromPanel !== true)
-      .sort((a, b) => categoryOrder.indexOf(a.category) - categoryOrder.indexOf(b.category))
+      .sort((a, b) => rank(a.category) - rank(b.category))
       .map((command) => ({
         name: command.name,
         buttonLabel: command.buttonLabel ?? command.name,
@@ -3203,6 +3216,41 @@ export class Bridge {
   }
 
   /**
+   * Start one allowlisted card command and translate a refusal into the
+   * user-facing message. Shared by the external-card button seam and the
+   * panel/slash entry point, so both refuse (and explain) identically.
+   * @param request - the command name plus its arguments.
+   * @param context - the substitution sources (`{card}` / `{chat}` /
+   *   `{operator}` / `{form.<name>}`); a panel launch has no card or form.
+   * @returns `{ ok: true }`, or the localized refusal text.
+   */
+  private startCardCommand(
+    request: CardRunRequest,
+    context: CardRunContext,
+  ): { ok: true } | { ok: false; text: string } {
+    const outcome = this.cardRunner.run(request, context);
+    if (outcome.ok) {
+      this.options.logger.info(
+        `card run "${request.name}" -> pid ${outcome.pid} (chat ${context.chatId})`,
+      );
+      return { ok: true };
+    }
+    this.options.logger.warn(
+      `card run "${request.name}" refused (${outcome.code}): ${outcome.detail}`,
+    );
+    if (outcome.code === 'not-allowed') {
+      return { ok: false, text: t('cardRun.notAllowed', { name: request.name }) };
+    }
+    if (outcome.code === 'busy') {
+      return { ok: false, text: t('cardRun.busy', { name: outcome.detail }) };
+    }
+    if (outcome.code === 'invalid') {
+      return { ok: false, text: t('cardRun.invalid', { detail: outcome.detail }) };
+    }
+    return { ok: false, text: t('cardRun.failed', { name: request.name, detail: outcome.detail }) };
+  }
+
+  /**
    * Run one allowlisted local command for an external card's button.
    *
    * No agent turn is involved: the card IS the UI, and the command it names is
@@ -3225,30 +3273,13 @@ export class Bridge {
       await notify(t('cardRun.invalid', { detail: parsed.detail }));
       return;
     }
-    const outcome = this.cardRunner.run(parsed.request, {
+    const outcome = this.startCardCommand(parsed.request, {
       chatId: action.chatId,
       messageId: action.messageId,
       operatorOpenId: action.operatorOpenId,
       formValue: action.formValue ?? {},
     });
-    if (outcome.ok) {
-      this.options.logger.info(
-        `card run "${parsed.request.name}" -> pid ${outcome.pid} (card ${action.messageId})`,
-      );
-      return;
-    }
-    this.options.logger.warn(
-      `card run "${parsed.request.name}" refused (${outcome.code}): ${outcome.detail}`,
-    );
-    if (outcome.code === 'not-allowed') {
-      await notify(t('cardRun.notAllowed', { name: parsed.request.name }));
-    } else if (outcome.code === 'busy') {
-      await notify(t('cardRun.busy', { name: outcome.detail }));
-    } else if (outcome.code === 'invalid') {
-      await notify(t('cardRun.invalid', { detail: outcome.detail }));
-    } else {
-      await notify(t('cardRun.failed', { name: parsed.request.name, detail: outcome.detail }));
-    }
+    if (!outcome.ok) await notify(outcome.text);
   }
 
   /** Register the built-in surface commands. */
@@ -3349,6 +3380,16 @@ export class Bridge {
       lastOutput: (chatId) => bridge.streaming.lastOutput(chatId),
       liveAgent: (chatId) => bridge.liveAgent(chatId),
       sendLog: (chatId) => bridge.sendLogFile(chatId),
+      runCardCommand: (name, args, context) =>
+        bridge.startCardCommand(
+          { name, args },
+          {
+            chatId: context.chatId,
+            messageId: context.messageId ?? '',
+            operatorOpenId: context.operatorOpenId,
+            formValue: {},
+          },
+        ),
     };
   }
 }

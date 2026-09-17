@@ -197,6 +197,7 @@ export const zhMessages: Record<MessageKey, string> = {
   'panel.action.effortPickInvalid': '未选择思考深度。',
   'panel.category.agent': '🤖 智能体',
   'panel.category.session': '🧩 会话',
+  'panel.category.card': '🎨 卡片',
   'panel.category.chat': '💬 聊天',
   'panel.category.system': '⚙️ 系统',
   'panel.view.unknownSession': '（未知）',
@@ -248,6 +249,7 @@ export const zhMessages: Record<MessageKey, string> = {
   'command.cmd.help.label': '❓ 帮助',
   'command.cmd.log.label': '📄 导出日志',
   'command.cmd.group.label': '👥 新建群组',
+  'command.cmd.imagecard.label': '🎨 生图卡片',
   'command.cmd.cancel.label': '⏹ 停止回复',
   'command.cmd.cd.label': '📁 更改目录',
   'command.cmd.repo.label': '📚 选择项目',
@@ -275,6 +277,8 @@ export const zhMessages: Record<MessageKey, string> = {
   'command.help.panel': '打开控制面板卡片（所有命令以按钮形式展示）',
   'command.help.log': '将 dsh-feishu 日志文件发送到此聊天',
   'command.help.group': '创建包含你和机器人的群聊',
+  'command.help.imagecard':
+    '在本会话创建/刷新一张生图卡片（工作流、提示词、尺寸、种子、张数 + 生成/结束引擎按钮）',
   'command.help.cancel': '停止当前回复',
   'command.help.cd': '设置本聊天的工作目录（会话将在此重启）',
   'command.help.repo': '选择项目目录（不带参数扫描默认根；/repo <路径> 扫描该路径）',
@@ -443,4 +447,6 @@ export const zhMessages: Record<MessageKey, string> = {
   'cardRun.busy': '⏳ 本会话已有一个卡片命令（{name}）在跑，等它结束再点。',
   'cardRun.invalid': '🚫 卡片按钮载荷无效：{detail}',
   'cardRun.failed': '🚫 卡片命令「{name}」启动失败：{detail}',
+  'command.error.cardCommandUnavailable':
+    '🚫 本部署没有启用卡片命令通道（缺少 cardCommands runner）。',
 };
