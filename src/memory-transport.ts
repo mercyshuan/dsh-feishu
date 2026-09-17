@@ -31,6 +31,7 @@ import type {
   ChatStats,
   FeishuMessage,
   FeishuTransport,
+  RecentChatMessage,
   SentCard,
 } from './feishu/types.js';
 
@@ -50,6 +51,14 @@ export interface MemoryTransportOptions {
    * so integration tests can exercise the download path without Feishu.
    */
   readonly attachments?: ReadonlyMap<string, { data: Uint8Array; mediaType?: string }>;
+  /**
+   * Seeded chat history for the inbound-context-merge fallback, keyed by chat
+   * id and NEWEST first (`listRecentMessages` filters it by the requested
+   * window). Absent means the transport cannot serve history at all and the
+   * read resolves `undefined` — the same degradation a real transport shows
+   * when the platform call fails.
+   */
+  readonly recentMessages?: ReadonlyMap<string, readonly RecentChatMessage[]>;
 }
 
 /** One recorded send/update in the outbox. */
@@ -82,6 +91,7 @@ export class MemoryTransport implements FeishuTransport {
   private readonly botOpenId: string | undefined;
   private readonly stats: ChatStats | undefined;
   private readonly seededAttachments: ReadonlyMap<string, { data: Uint8Array; mediaType?: string }>;
+  private readonly seededHistory: ReadonlyMap<string, readonly RecentChatMessage[]> | undefined;
   private seq = 0;
   private readonly inboxDir: string;
   private readonly actionsDir: string;
@@ -96,6 +106,7 @@ export class MemoryTransport implements FeishuTransport {
     this.botOpenId = options.botOpenId;
     this.stats = options.chatStats;
     this.seededAttachments = options.attachments ?? new Map();
+    this.seededHistory = options.recentMessages;
   }
 
   /** The bot's own open id configured for this transport. */
@@ -106,6 +117,26 @@ export class MemoryTransport implements FeishuTransport {
   /** Membership counts configured for this transport. */
   async chatStats(_chatId: string): Promise<ChatStats | undefined> {
     return this.stats;
+  }
+
+  /**
+   * Serve the seeded chat history for the context-merge fallback, filtered by
+   * the requested window and capped at `max`, newest first. `undefined` when
+   * no history was seeded — the transport "cannot serve history" case.
+   * @param chatId - the chat to read.
+   * @param options - the window (epoch ms) and the maximum entries.
+   * @returns the matching messages newest-first, or `undefined` when unseeded.
+   */
+  async listRecentMessages(
+    chatId: string,
+    options: { since: number; until: number; max: number },
+  ): Promise<readonly RecentChatMessage[] | undefined> {
+    if (this.seededHistory === undefined) return undefined;
+    const messages = this.seededHistory.get(chatId) ?? [];
+    return messages
+      .filter((message) => message.createdAt >= options.since && message.createdAt <= options.until)
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, Math.max(0, Math.floor(options.max)));
   }
 
   /** Create a fake group; the chat id derives from the name. */

@@ -94,7 +94,7 @@ endpoint、宿主机无需公网 IP（所有流量均为出站）。在 **Events
 
 | Scope | Purpose |
 |---|---|
-| `im:message` | 接收消息（`im.message.receive_v1`） |
+| `im:message` | 接收消息（`im.message.receive_v1`），以及读取会话历史（`im.v1.message.list`：入站上下文合并的回退路径与引用消息读取） |
 | `im:message.group_at_msg:readonly` | 接收群聊中 @ 机器人的消息 |
 | `im:message.group_msg` | 接收群聊中**所有**消息（含未 @ 的；`groupMentionMode: always` 下 1 用户 1 机器人的 solo 放行依赖它） |
 | `im:message.group_msg.include_bot:read` | 包含群聊中**其他机器人**发送的消息（群里有别的机器人时 solo 放行仍生效） |

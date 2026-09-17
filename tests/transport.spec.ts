@@ -15,6 +15,7 @@ import {
   normalizeCardAction,
   normalizeMessageEvent,
   normalizeQuotedMessage,
+  normalizeRecentMessage,
   parseBotOpenId,
   parseMessageBody,
 } from '../src/transport.js';
@@ -431,6 +432,139 @@ describe('LarkTransport quoted messages', () => {
     const delivered = await deliver(quoteTransport(get), inbound());
     expect(get).not.toHaveBeenCalled();
     expect(delivered[0]?.quoted).toBeUndefined();
+  });
+});
+
+describe('normalizeRecentMessage', () => {
+  it('normalizes a text history item (mentions stripped)', () => {
+    expect(
+      normalizeRecentMessage({
+        message_id: 'om_1',
+        msg_type: 'text',
+        create_time: '1700000000000',
+        sender: { id: 'ou_rui', sender_type: 'user' },
+        body: { content: JSON.stringify({ text: '小蕊1' }) },
+      }),
+    ).toEqual({
+      messageId: 'om_1',
+      senderOpenId: 'ou_rui',
+      senderType: 'user',
+      text: '小蕊1',
+      attachments: [],
+      createdAt: 1_700_000_000_000,
+    });
+  });
+
+  it('keeps an image item as a downloadable attachment', () => {
+    const message = normalizeRecentMessage({
+      message_id: 'om_2',
+      msg_type: 'image',
+      create_time: '1700000000000',
+      sender: { id: 'ou_rui', sender_type: 'user' },
+      body: { content: JSON.stringify({ image_key: 'img_v2_x' }) },
+    });
+    expect(message?.text).toBe('');
+    expect(message?.attachments).toEqual([{ kind: 'image', key: 'img_v2_x' }]);
+  });
+
+  it('marks a recalled item instead of dropping it (it still holds its place)', () => {
+    const message = normalizeRecentMessage({
+      message_id: 'om_3',
+      msg_type: 'text',
+      create_time: '1700000000000',
+      deleted: true,
+      sender: { id: 'ou_rui', sender_type: 'user' },
+      body: { content: JSON.stringify({ text: 'gone' }) },
+    });
+    expect(message?.recalled).toBe(true);
+    expect(message?.text).toBe('');
+  });
+
+  it('reports a known-but-unhandled type by name, never its raw body', () => {
+    const message = normalizeRecentMessage({
+      message_id: 'om_4',
+      msg_type: 'interactive',
+      create_time: '1700000000000',
+      sender: { id: 'ou_rui', sender_type: 'user' },
+      body: { content: '{"elements":[]}' },
+    });
+    expect(message?.unsupportedType).toBe('interactive');
+    expect(message?.text).toBe('');
+  });
+
+  it('drops an item without a message id', () => {
+    expect(normalizeRecentMessage({ msg_type: 'text' })).toBeUndefined();
+  });
+});
+
+describe('LarkTransport chat history', () => {
+  function historyTransport(list: unknown): LarkTransport {
+    const transport = new LarkTransport({
+      credentials: { appId: 'cli_test', appSecret: 'secret' },
+    });
+    // Swap in a fake SDK client (never started here, so no network).
+    (transport as unknown as { client: { im: { v1: { message: { list: unknown } } } } }).client = {
+      im: { v1: { message: { list } } },
+    } as never;
+    return transport;
+  }
+
+  it('reads the window in seconds, newest first, and normalizes the page', async () => {
+    const list = vi.fn().mockResolvedValue({
+      code: 0,
+      data: {
+        items: [
+          {
+            message_id: 'om_b',
+            msg_type: 'text',
+            create_time: '1700000002000',
+            sender: { id: 'ou_rui', sender_type: 'user' },
+            body: { content: JSON.stringify({ text: '小蕊2' }) },
+          },
+          {
+            message_id: 'om_a',
+            msg_type: 'text',
+            create_time: '1700000001000',
+            sender: { id: 'ou_rui', sender_type: 'user' },
+            body: { content: JSON.stringify({ text: '小蕊1' }) },
+          },
+        ],
+      },
+    });
+    const messages = await historyTransport(list).listRecentMessages('oc_chat', {
+      since: 1_700_000_000_000,
+      until: 1_700_000_003_000,
+      max: 50,
+    });
+
+    expect(list).toHaveBeenCalledWith({
+      params: {
+        container_id_type: 'chat',
+        container_id: 'oc_chat',
+        start_time: '1700000000',
+        end_time: '1700000003',
+        sort_type: 'ByCreateTimeDesc',
+        page_size: 50,
+      },
+    });
+    expect(messages?.map((m) => m.text)).toEqual(['小蕊2', '小蕊1']);
+  });
+
+  it('caps the platform page at 50 entries', async () => {
+    const list = vi.fn().mockResolvedValue({ code: 0, data: { items: [] } });
+    await historyTransport(list).listRecentMessages('oc_chat', {
+      since: 0,
+      until: 1,
+      max: 500,
+    });
+    expect(list).toHaveBeenCalledWith({ params: expect.objectContaining({ page_size: 50 }) });
+  });
+
+  it('degrades to undefined on a failed read instead of throwing', async () => {
+    const list = vi.fn().mockResolvedValue({ code: 99991, msg: 'no permission' });
+    await expect(
+      historyTransport(list).listRecentMessages('oc_chat', { since: 0, until: 1, max: 10 }),
+    ).resolves.toBeUndefined();
   });
 });
 

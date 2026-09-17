@@ -39,6 +39,7 @@ import type {
   FeishuMessage,
   FeishuTransport,
   QuotedMessage,
+  RecentChatMessage,
   SentCard,
 } from '../src/feishu/types.js';
 import { SessionMap } from '../src/session-map.js';
@@ -134,6 +135,28 @@ class RecordingTransport implements FeishuTransport {
   }
   deliver(message: FeishuMessage): void {
     this.handler?.(message);
+  }
+
+  /** Every `listRecentMessages` call (inbound-context-merge assertions). */
+  readonly historyCalls: Array<{
+    chatId: string;
+    since: number;
+    until: number;
+    max: number;
+  }> = [];
+  /** Seeded platform history for the context-merge fallback. Unset means the
+   *  platform read is UNAVAILABLE (the degradation case). */
+  recentMessagesImpl?: (
+    chatId: string,
+    options: { since: number; until: number; max: number },
+  ) => Promise<readonly RecentChatMessage[] | undefined>;
+  async listRecentMessages(
+    chatId: string,
+    options: { since: number; until: number; max: number },
+  ): Promise<readonly RecentChatMessage[] | undefined> {
+    this.historyCalls.push({ chatId, ...options });
+    if (this.recentMessagesImpl === undefined) return undefined;
+    return this.recentMessagesImpl(chatId, options);
   }
 }
 
@@ -231,6 +254,8 @@ interface Harness {
   bridge: Bridge;
   disposeEvents: () => void;
   emit: (sessionId: string, event: SessionEvent) => void;
+  /** Publish one transient `agent/assistant-stream` frame (dsh 0.1.5). */
+  emitStream: (sessionId: string, chunk: AssistantStreamChunk) => void;
 }
 
 function makeHarness(
@@ -258,6 +283,7 @@ function makeHarness(
     saveInboundFile?: NonNullable<BridgeOptions['saveInboundFile']>;
     identityAliasesFile?: string;
     identityInjection?: boolean;
+    contextMerge?: NonNullable<BridgeOptions['contextMerge']>;
   } = {},
 ): Harness {
   const transport = new RecordingTransport();
@@ -329,6 +355,7 @@ function makeHarness(
     ...(options.identityInjection !== undefined
       ? { identityInjection: options.identityInjection }
       : {}),
+    ...(options.contextMerge !== undefined ? { contextMerge: options.contextMerge } : {}),
     // Tests default the working-directory gate OFF (production defaults it
     // ON); the gate's own tests enable it explicitly.
     requireWorkingDir: options.requireWorkingDir ?? false,
@@ -355,8 +382,16 @@ function makeHarness(
 
 /** The text of the identity block the surface injects into every turn — it is
  *  always the FIRST content block (identity injection). */
-function leadingIdentity(blocks: readonly { readonly type: string; readonly text?: string }[]): string {
+function leadingIdentity(
+  blocks: readonly { readonly type: string; readonly text?: string }[],
+): string {
   return blocks[0]?.text ?? '';
+}
+
+/** The text of a content block, or '' for a block that carries none (image). */
+function textOf(block: unknown): string {
+  const text = (block as { readonly text?: unknown } | undefined)?.text;
+  return typeof text === 'string' ? text : '';
 }
 
 function message(overrides: Partial<FeishuMessage> = {}): FeishuMessage {
@@ -883,8 +918,10 @@ describe('Bridge', () => {
       await h.bridge.handleMessage(
         message({ messageId: 'om_msg2', senderOpenId: 'ou_wang', text: 'second' }),
       );
-      const second = (h.agentStore.followups.get('feishu-session-1')?.[1]?.content ??
-        []) as Array<{ type: string; text: string }>;
+      const second = (h.agentStore.followups.get('feishu-session-1')?.[1]?.content ?? []) as Array<{
+        type: string;
+        text: string;
+      }>;
       expect(leadingIdentity(second)).toContain('当前对话对象：小义（王天义）');
       expect(leadingIdentity(second)).toContain('· 知识库：kb/wang ·');
       expect(second[1]).toEqual({ type: 'text', text: 'second' });
@@ -2057,11 +2094,15 @@ describe('Bridge', () => {
       await h.bridge.handleMessage(groupMessage(['ou_bot'], { text: '' }));
       expect(h.agentStore.followups.get('feishu-session-1')).toHaveLength(1);
       // An @-only message has no text of its own: the identity block (always
-      // injected, group included) is the turn's only content block.
+      // injected, group included) plus the inbound-context-merge block are the
+      // turn's content — the merge block reports that nothing earlier exists,
+      // so the turn is never content-less.
       const content = h.agentStore.followups.get('feishu-session-1')?.[0]?.content ?? [];
-      expect(content).toHaveLength(1);
+      expect(content).toHaveLength(2);
       expect(leadingIdentity(content)).toContain('[Feishu identity]');
       expect(leadingIdentity(content)).toContain('类型：群聊');
+      expect(textOf(content[1])).toContain('without any text');
+      expect(textOf(content[1])).toContain('No earlier message from this sender is available');
     });
 
     it('respects the chat allowlist', async () => {
@@ -2070,6 +2111,175 @@ describe('Bridge', () => {
       expect(h.agentStore.followups.get('feishu-session-1')).toBeUndefined();
     });
   });
+  describe('inbound context merge', () => {
+    const BASE = 1_700_000_000_000;
+
+    /** A group message from `sender` that does NOT mention the bot (so the
+     *  mention gate drops it — the population the merge exists for). */
+    function overheard(messageId: string, senderOpenId: string, text: string, at: number) {
+      return groupMessage([], { messageId, senderOpenId, text, createdAt: at });
+    }
+
+    /** The text-less @-mention that triggers a merge. */
+    function bareMention(messageId: string, senderOpenId: string, at: number) {
+      return groupMessage(['ou_bot'], {
+        messageId,
+        senderOpenId,
+        text: '',
+        createdAt: at,
+      });
+    }
+
+    function mergedBlock(h: Harness, turn = 0): string {
+      const content = h.agentStore.followups.get('feishu-session-1')?.[turn]?.content ?? [];
+      return (
+        content.map(textOf).find((text) => text.includes('@-mentioned you in this group')) ?? ''
+      );
+    }
+
+    it("merges the sender's immediately preceding messages into an empty @-mention", async () => {
+      const h = makeHarness({ groupMentionMode: 'always' });
+      // 小义1 breaks the run: the merge must not reach past another member.
+      await h.bridge.handleMessage(overheard('om_yi1', 'ou_yi', '小义1', BASE));
+      await h.bridge.handleMessage(overheard('om_rui1', 'ou_rui', '小蕊1', BASE + 1000));
+      await h.bridge.handleMessage(overheard('om_rui2', 'ou_rui', '小蕊2', BASE + 2000));
+      await h.bridge.handleMessage(bareMention('om_rui3', 'ou_rui', BASE + 3000));
+
+      expect(h.agentStore.followups.get('feishu-session-1')).toHaveLength(1);
+      const merged = mergedBlock(h);
+      expect(merged).toContain('[1] 小蕊1');
+      expect(merged).toContain('[2] 小蕊2');
+      expect(merged).not.toContain('小义1');
+      expect(merged).toContain('[End of the earlier messages');
+      // The buffer already had the run: no platform read is issued.
+      expect(h.transport.historyCalls).toHaveLength(0);
+    });
+
+    it('reads the platform history when the buffer has no preceding message', async () => {
+      const h = makeHarness({ groupMentionMode: 'always' });
+      h.transport.recentMessagesImpl = async () => [
+        {
+          messageId: 'om_hist1',
+          senderOpenId: 'ou_rui',
+          senderType: 'user',
+          text: 'earlier from the platform',
+          attachments: [],
+          createdAt: BASE + 1000,
+        },
+      ];
+      await h.bridge.handleMessage(bareMention('om_rui3', 'ou_rui', BASE + 3000));
+
+      expect(h.transport.historyCalls).toHaveLength(1);
+      expect(h.transport.historyCalls[0]).toMatchObject({ chatId: 'oc_chat', max: 50 });
+      expect(mergedBlock(h)).toContain('earlier from the platform');
+    });
+
+    it('strips inline mention tokens out of the platform history text', async () => {
+      const h = makeHarness({ groupMentionMode: 'always' });
+      h.transport.recentMessagesImpl = async () => [
+        {
+          messageId: 'om_hist1',
+          senderOpenId: 'ou_rui',
+          senderType: 'user',
+          text: '@_user_1 小蕊1',
+          attachments: [],
+          createdAt: BASE + 1000,
+        },
+      ];
+      await h.bridge.handleMessage(bareMention('om_rui3', 'ou_rui', BASE + 3000));
+      const merged = mergedBlock(h);
+      expect(merged).toContain('[1] 小蕊1');
+      expect(merged).not.toContain('@_user_1');
+    });
+
+    it('degrades loudly when neither the buffer nor the platform can supply context', async () => {
+      const h = makeHarness({ groupMentionMode: 'always' });
+      await h.bridge.handleMessage(bareMention('om_rui3', 'ou_rui', BASE + 3000));
+      // The read WAS attempted (the transport exposes the capability).
+      expect(h.transport.historyCalls).toHaveLength(1);
+      const merged = mergedBlock(h);
+      expect(merged).toContain('No earlier message from this sender is available');
+      // The mention still ran a turn: context is an enhancement, never a gate.
+      expect(h.agentStore.followups.get('feishu-session-1')).toHaveLength(1);
+    });
+
+    it('reports how many earlier messages the limits left out', async () => {
+      const h = makeHarness({ groupMentionMode: 'always', contextMerge: { maxMessages: 2 } });
+      await h.bridge.handleMessage(overheard('om_rui1', 'ou_rui', '小蕊1', BASE));
+      await h.bridge.handleMessage(overheard('om_rui2', 'ou_rui', '小蕊2', BASE + 1000));
+      await h.bridge.handleMessage(overheard('om_rui3', 'ou_rui', '小蕊3', BASE + 2000));
+      await h.bridge.handleMessage(bareMention('om_rui4', 'ou_rui', BASE + 3000));
+
+      const merged = mergedBlock(h);
+      expect(merged).toContain('[1] 小蕊2');
+      expect(merged).toContain('[2] 小蕊3');
+      expect(merged).not.toContain('小蕊1');
+      expect(merged).toContain('1 earlier message(s) from this sender were left out');
+    });
+
+    it('does not merge messages the agent has already been given', async () => {
+      const h = makeHarness({ groupMentionMode: 'always' });
+      // Turn 1 delivers a real @-message; turn 2 is the bare mention.
+      await h.bridge.handleMessage(
+        groupMessage(['ou_bot'], {
+          messageId: 'om_rui1',
+          senderOpenId: 'ou_rui',
+          text: '小蕊1',
+          createdAt: BASE,
+        }),
+      );
+      await h.bridge.handleMessage(bareMention('om_rui2', 'ou_rui', BASE + 1000));
+
+      expect(h.agentStore.followups.get('feishu-session-1')).toHaveLength(2);
+      const merged = mergedBlock(h, 1);
+      expect(merged).toContain('No earlier message from this sender is available');
+      expect(merged).not.toContain('小蕊1');
+    });
+
+    it('reports an earlier attachment whose download fails instead of dropping it', async () => {
+      const h = makeHarness({ groupMentionMode: 'always' });
+      h.transport.recentMessagesImpl = async () => [
+        {
+          messageId: 'om_hist1',
+          senderOpenId: 'ou_rui',
+          senderType: 'user',
+          text: '看图',
+          attachments: [{ kind: 'image', key: 'img_v2_x' }],
+          createdAt: BASE + 1000,
+        },
+      ];
+      await h.bridge.handleMessage(bareMention('om_rui3', 'ou_rui', BASE + 3000));
+      const merged = mergedBlock(h);
+      expect(merged).toContain('[1] 看图');
+      expect(merged).toContain('[attachment: img_v2_x — download failed');
+    });
+
+    it('merges nothing when the feature is disabled', async () => {
+      const h = makeHarness({ groupMentionMode: 'always', contextMerge: { enabled: false } });
+      await h.bridge.handleMessage(overheard('om_rui1', 'ou_rui', '小蕊1', BASE));
+      await h.bridge.handleMessage(bareMention('om_rui2', 'ou_rui', BASE + 1000));
+      const content = h.agentStore.followups.get('feishu-session-1')?.[0]?.content ?? [];
+      expect(content).toHaveLength(1);
+      expect(h.transport.historyCalls).toHaveLength(0);
+    });
+
+    it('leaves a p2p message and a mentioned message with text alone', async () => {
+      const p2p = makeHarness();
+      await p2p.bridge.handleMessage(message({ text: '', messageId: 'om_p2p' }));
+      const p2pContent = p2p.agentStore.followups.get('feishu-session-1')?.[0]?.content ?? [];
+      expect(p2pContent).toHaveLength(1);
+
+      const group = makeHarness({ groupMentionMode: 'always' });
+      await group.bridge.handleMessage(
+        groupMessage(['ou_bot'], { messageId: 'om_text', text: '看这个' }),
+      );
+      const groupContent = group.agentStore.followups.get('feishu-session-1')?.[0]?.content ?? [];
+      expect(
+        groupContent.map(textOf).filter((t) => t.includes('@-mentioned you in this group')),
+      ).toEqual([]);
+    });
+  });
+
   describe('slash commands', () => {
     it('/help replies with the command list', async () => {
       const h = makeHarness();

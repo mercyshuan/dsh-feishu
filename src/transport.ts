@@ -33,6 +33,7 @@ import type {
   FeishuTransport,
   InboundAttachment,
   QuotedMessage,
+  RecentChatMessage,
   SentCard,
 } from './feishu/types.js';
 import { serializePost } from './rich-text.js';
@@ -133,6 +134,9 @@ const KNOWN_UNSUPPORTED_MESSAGE_TYPES = new Set([
   'merge',
   'interactive',
 ]);
+
+/** Platform page cap for `im.v1.message.list` (`page_size` max is 50). */
+const MAX_HISTORY_PAGE = 50;
 
 /** Parse an image/file message's content JSON into its attachment, or
  *  `undefined` when the content is malformed. */
@@ -317,6 +321,60 @@ export function normalizeQuotedMessage(response: unknown, messageId: string): Qu
     return unavailable(`the quoted ${messageType} message's body could not be parsed`);
   }
   return { messageId, senderOpenId, text: parsed.text, attachments: parsed.attachments };
+}
+
+/**
+ * Normalize one `im.v1.message.list` item into the surface's earlier-message
+ * view (inbound-context-merge). Pure function — unit-testable without any SDK
+ * connection.
+ *
+ * Unlike a quoted message, a history item that cannot be rendered is NOT a
+ * failure to report: it is just one entry of a conversation, and the caller
+ * only needs to know WHAT it was so the run stays honest about it. Recalled
+ * and known-but-unhandled entries therefore keep their place with their
+ * `recalled` / `unsupportedType` marker rather than becoming `undefined`.
+ * @param item - one raw history item.
+ * @returns the normalized message, or `undefined` when it carries no id.
+ */
+export function normalizeRecentMessage(item: unknown): RecentChatMessage | undefined {
+  const entry = item as
+    | {
+        message_id?: string;
+        msg_type?: string;
+        create_time?: string;
+        deleted?: boolean;
+        sender?: { id?: string; sender_type?: string };
+        body?: { content?: string };
+      }
+    | null
+    | undefined;
+  const messageId = entry?.message_id;
+  if (messageId === undefined || messageId === '') return undefined;
+  const createdAt = Number(entry?.create_time);
+  const base = {
+    messageId,
+    senderOpenId: entry?.sender?.id ?? '',
+    senderType: entry?.sender?.sender_type ?? '',
+    createdAt: Number.isFinite(createdAt) ? createdAt : 0,
+  };
+  if (entry?.deleted === true) {
+    return { ...base, text: '', attachments: [], recalled: true };
+  }
+  const messageType = entry?.msg_type ?? '';
+  if (!SUPPORTED_MESSAGE_TYPES.has(messageType)) {
+    // Report the TYPE only — a card's JSON is not text.
+    return {
+      ...base,
+      text: '',
+      attachments: [],
+      unsupportedType: messageType === '' ? 'unknown' : messageType,
+    };
+  }
+  const parsed = parseMessageBody(messageType, entry?.body?.content ?? '');
+  if (parsed === undefined) {
+    return { ...base, text: '', attachments: [], unsupportedType: messageType };
+  }
+  return { ...base, text: parsed.text, attachments: parsed.attachments };
 }
 
 /**
@@ -644,6 +702,51 @@ export class LarkTransport implements FeishuTransport {
   /** The bot's own open id, or `undefined` until resolved. */
   getBotOpenId(): string | undefined {
     return this.botOpenIdValue;
+  }
+
+  /**
+   * Read a chat's recent history, newest first (`im.v1.message.list`).
+   *
+   * The surface's own inbound buffer covers the common case; this is the
+   * fallback for a run it never saw (a fresh process, or history older than
+   * the buffer's cap). One platform page is enough: the collected run starts
+   * at the trigger and walks backwards, so anything beyond the newest page
+   * could never be contiguous anyway.
+   * @param chatId - the chat to read.
+   * @param options - the window (epoch ms) and the maximum entries to return.
+   * @returns the normalized messages newest-first, or `undefined` when the
+   *   read failed (the caller degrades loudly and the turn still runs).
+   */
+  async listRecentMessages(
+    chatId: string,
+    options: { since: number; until: number; max: number },
+  ): Promise<readonly RecentChatMessage[] | undefined> {
+    const pageSize = Math.min(Math.max(Math.floor(options.max), 1), MAX_HISTORY_PAGE);
+    try {
+      const response = await this.client.im.v1.message.list({
+        params: {
+          container_id_type: 'chat',
+          container_id: chatId,
+          // The platform takes SECONDS; the surface speaks epoch ms.
+          start_time: String(Math.floor(options.since / 1000)),
+          end_time: String(Math.floor(options.until / 1000)),
+          sort_type: 'ByCreateTimeDesc',
+          page_size: pageSize,
+        },
+      });
+      this.assertOk(response, 'im.v1.message.list');
+      const items = response.data?.items ?? [];
+      const messages = items
+        .map((item) => normalizeRecentMessage(item))
+        .filter((message): message is RecentChatMessage => message !== undefined);
+      this.logger?.debug(
+        `chat history ${chatId}: ${messages.length} message(s) in window (page_size ${pageSize})`,
+      );
+      return messages;
+    } catch (error: unknown) {
+      this.logger?.warn(`chat history read failed (chat ${chatId}): ${String(error)}`);
+      return undefined;
+    }
   }
 
   /**

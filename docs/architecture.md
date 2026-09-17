@@ -132,6 +132,20 @@ Feishu user ──message──> Feishu platform ──WS long connection──>
   body, API error) reaches the agent as `unavailable` instead of vanishing. A
   quoted message starts its own turn even when it carries attachments and no
   text — it never enters the pending list.
+- **Inbound context merge.** A group @-mention whose own text is empty absorbs
+  the sender's immediately preceding messages — the ones the mention gate
+  dropped, so the agent never saw them. The bridge buffers every inbound
+  message that passes dedup (newest 50 per chat, in memory; slash lines are
+  not conversation and are not buffered) and walks it newest-first, stopping at
+  a different sender, at the per-chat delivery watermark (the newest message
+  already handed to the agent), at `maxMessages` (10) or at `windowMs` (10 min).
+  A buffer miss falls back to `im.v1.message.list` through the transport
+  (`listRecentMessages`, optional on the seam); a failed read degrades loudly
+  and the turn still runs. Selection is the pure `collectContextRun`
+  (`src/context-merge.ts`); the bridge renders one block that spells out the
+  coverage (how many earlier messages were left out) and reuses the quoted-media
+  seam for earlier attachments (no receipt card). `contextMerge.enabled: false`
+  restores the pre-feature behavior.
 - **Configurable group mention gate.** `groupMentionMode` (botmux
   semantics): `always` requires an @-mention (relaxed in 1-person-1-bot solo
   groups via cached chat member counts); `never` answers every group message;

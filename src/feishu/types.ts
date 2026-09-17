@@ -84,6 +84,39 @@ export interface QuotedMessage {
   readonly unavailable?: string;
 }
 
+/**
+ * One EARLIER chat message read back for inbound context merging
+ * (inbound-context-merge): a message that arrived before the trigger and was
+ * never delivered to the agent. Sourced either from the platform history API
+ * (`im.v1.message.list`) or from the bridge's own inbound buffer, which is
+ * why it speaks the same vocabulary as {@link FeishuMessage} minus the
+ * fields only a live event carries.
+ */
+export interface RecentChatMessage {
+  /** The message's id (its own, so media stays downloadable by it). */
+  readonly messageId: string;
+  /** The sender's app-scoped open id ('' when the platform reported none). */
+  readonly senderOpenId: string;
+  /** Platform sender type: `user`, `app` (a bot), `anonymous`, … */
+  readonly senderType: string;
+  /** Plain text, mentions stripped; empty for a media-only message. */
+  readonly text: string;
+  /** Media the message carried, still resolvable through its own id. */
+  readonly attachments: readonly InboundAttachment[];
+  /**
+   * Set for a KNOWN-but-unhandled type (interactive card, sticker, …): the
+   * TYPE is reported, the raw body never is (a card's JSON is not text).
+   */
+  readonly unsupportedType?: string;
+  /**
+   * Set when the message was recalled: it still occupies its place in the
+   * conversation (so it breaks a same-sender run) but carries no content.
+   */
+  readonly recalled?: boolean;
+  /** Unix epoch milliseconds from the platform `create_time`. */
+  readonly createdAt: number;
+}
+
 /** One inbound media attachment normalized from a Feishu message. */
 export interface InboundAttachment {
   /** `image` (image_key) or `file` (file_key) — the download API to use. */
@@ -349,6 +382,24 @@ export interface FeishuTransport {
    * start). Used to detect whether a group message mentions the bot.
    */
   getBotOpenId(): string | undefined;
+  /**
+   * Read a chat's recent history, NEWEST first (`im.v1.message.list`), for
+   * the inbound-context-merge fallback: the surface merges the sender's
+   * preceding messages into a text-less @-mention, and asks the platform
+   * when its own inbound buffer has no earlier message (a fresh process, or
+   * messages that arrived before this one started).
+   *
+   * Resolves `undefined` when the platform read failed OR this transport
+   * cannot serve history at all — the caller degrades (loudly) and the turn
+   * still runs. Optional: test doubles and older transports omit it.
+   * @param chatId - the chat to read.
+   * @param options - the time window (epoch ms) and the maximum entries to
+   *   return; the transport returns at most one platform page.
+   */
+  listRecentMessages?(
+    chatId: string,
+    options: { readonly since: number; readonly until: number; readonly max: number },
+  ): Promise<readonly RecentChatMessage[] | undefined>;
   /**
    * Create a group chat with the given name and members (the bot becomes the
    * owner/creator). Resolves with the new chat id.

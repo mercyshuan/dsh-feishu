@@ -111,7 +111,7 @@ Current scopes (权限):
 
 | Scope | Purpose |
 |---|---|
-| `im:message` | Receive messages (`im.message.receive_v1`) |
+| `im:message` | Receive messages (`im.message.receive_v1`) and read chat history (`im.v1.message.list`, the inbound context merge's fallback and quoted-message reads) |
 | `im:message.group_at_msg:readonly` | Receive group messages that @-mention the bot |
 | `im:message.group_msg` | Receive **all** group messages, @-mentioned or not (required for the 1-user-1-bot solo-group relaxation under `groupMentionMode: always`) |
 | `im:message.group_msg.include_bot:read` | Include messages from **other bots** in the group (keeps solo-relaxation working when another bot joins) |

@@ -37,8 +37,8 @@ import {
   type AgentPresetsService,
   type AgentStore,
   type ApprovalRequestLike,
-  type AssistantStreamChunk,
   type AskQuestionsRequestLike,
+  type AssistantStreamChunk,
   Bridge,
   type BridgeLogger,
   type LlmService,
@@ -151,6 +151,19 @@ export interface Config {
    * `true`; `false` disables the injection entirely (diagnostic / rollback).
    */
   readonly identityInjection?: boolean;
+  /**
+   * Inbound context merge: when a group message @-mentions the bot WITHOUT
+   * any text of its own, the sender's immediately preceding messages — which
+   * never passed the group mention gate, so the agent never saw them — are
+   * merged into that turn. `enabled: false` turns the feature off.
+   */
+  readonly contextMerge?: {
+    readonly enabled?: boolean;
+    /** Keep at most this many earlier messages (default 10). */
+    readonly maxMessages?: number;
+    /** Look-back window in ms (default 10 minutes). */
+    readonly windowMs?: number;
+  };
 }
 
 /** Validated plugin configuration (schemastery schema). */
@@ -182,6 +195,13 @@ export const Config: z<Config> = z.object({
     .required(false),
   identityAliasesFile: z.string().required(false),
   identityInjection: z.boolean().required(false),
+  contextMerge: z
+    .object({
+      enabled: z.boolean().required(false),
+      maxMessages: z.natural().min(1).required(false),
+      windowMs: z.natural().min(1000).required(false),
+    })
+    .required(false),
 });
 
 /** Resolved credentials, or `undefined` when either value is missing. */
@@ -718,6 +738,7 @@ export function apply(ctx: Context, config: Config, deps: ApplyDeps = {}): void 
     ...(config.reactions !== undefined ? { reactions: config.reactions } : {}),
     identityAliasesFile,
     identityInjection,
+    ...(config.contextMerge !== undefined ? { contextMerge: config.contextMerge } : {}),
     executeCommand: (agent, line) => executeDshCommand(ctx, agent, line),
     listSessions: () => listSessions(ctx),
     readSession: (sessionId) => {

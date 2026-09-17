@@ -207,6 +207,30 @@ The harness sandbox (and this checkout's environment) has specific rules:
   the response carries no open id instead of failing silently. Verify the
   live shape with the real app — the SDK's `request` returns the raw body
   with `bot` at the top level.
+- **A dropped group message is invisible to the agent — recover it from the
+  surface's own buffer.** Under `always`, every un-mentioned group message is
+  discarded after `shouldRespond`, which means a user who fires three messages
+  and only @-mentions on the last one leaves the agent with the last one
+  alone — and if that mention carries no text, the turn is EMPTY (identity
+  block only). Two traps follow. (1) Record the inbound buffer BEFORE the
+  gate, not after: the gate-dropped messages are exactly the ones a later
+  text-less mention has to absorb, and the allowlists already make it safe to
+  record them (a merge never crosses senders, so an allowed user's turn cannot
+  absorb a disallowed user's words). (2) A run must stop at a DIFFERENT
+  SENDER and at a delivery watermark (the newest message already handed to the
+  agent) — walking back N same-sender messages across other people's replies
+  splices together a conversation that never happened, and re-merging what the
+  session already contains duplicates context the agent has read.
+- **Platform history text still carries `@_user_<n>` tokens.**
+  `parseMessageBody` strips the `<at …>` placeholder form a live event uses,
+  but `im.v1.message.list` serializes mentions into the body text as
+  `@_user_1`. Rendering that into the agent's context leaks raw tokens, so the
+  history text goes through the same `stripMentions` as a live message before
+  it is merged.
+- **`im.v1.message.list` takes SECONDS.** `start_time` / `end_time` are
+  second-granularity strings; the surface speaks epoch ms and divides at the
+  seam. Passing milliseconds silently asks for a window ~1000× too far in the
+  future (an empty page that looks like "nothing was said").
 
 ## Git discovery vs. scan roots
 

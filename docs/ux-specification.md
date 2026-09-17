@@ -1085,6 +1085,152 @@ per-message (stateless) and folded into the existing turn pipeline.
 - `parseMessageBody` is shared with the live inbound path on purpose: a quoted
   `post` must speak the same placeholder/attachment vocabulary as a live one.
 
+## Part: inbound-context-merge
+
+> A Feishu user often fires several messages in a row and only @-mentions the
+> bot on the LAST one — sometimes with an EMPTY body (just the mention). The
+> earlier messages never passed the group mention gate, so the agent never saw
+> them; the mention turn then carries no instruction at all. This part merges
+> the sender's immediately preceding messages into that turn.
+
+### Intended behavior
+
+**Trigger** — a GROUP message the mention gate ACCEPTED whose own text is
+empty after mention stripping and that carries no attachment of its own
+("just the mention"). Three near-misses are deliberately NOT triggers:
+
+| Message | Merge? | Why |
+|---|---|---|
+| p2p, empty text | no | a private chat has no mention gate — nothing was dropped, so nothing needs recovering |
+| group @ + text | no | the user said what they wanted; the earlier messages the agent already has stay untouched |
+| group @ + attachment, no text | no | the attachment IS the message; it runs the inbound-attachment path instead |
+
+**Source — buffer first, platform second** — the surface keeps its own
+per-chat inbound buffer, and only reads the platform when that buffer cannot
+answer:
+
+| Order | Source | When it is used | Cost |
+|---|---|---|---|
+| 1 | in-process inbound buffer | it holds at least one earlier message from the sender | none (no API call) |
+| 2 | `im.v1.message.list` | buffer miss: a fresh process, or history older than the buffer | one Feishu read per merge |
+
+The buffer records EVERY inbound message that got past dedup — including the
+ones the mention gate then DROPS, which is exactly the population this feature
+exists for. It is capped at the newest 50 messages per chat and lives in
+memory only: a restart starts empty and the platform read covers the gap.
+Slash lines are not buffered (a command is an instruction to the bot, not
+conversation to merge).
+
+**Selection rule** — `collectContextRun` (pure, `src/context-merge.ts`) walks
+the history NEWEST-first from the trigger and stops at the first of:
+
+| Stop | Meaning |
+|---|---|
+| a different sender | another member — or the bot itself — spoke; sweeping past them would splice together a conversation that never happened |
+| the delivery watermark | the newest message this chat already DELIVERED to the agent — it is in the session, so merging it again would duplicate context the agent has read |
+| the count limit | `maxMessages` (default 10) |
+| the time window | `windowMs` (default 10 minutes) before the trigger |
+
+Messages newer than the trigger, the trigger itself, and its own id are never
+part of the run. The reported scenario — `机器人1, 机器人2, 小义1, 小蕊1,
+小蕊2, 小蕊3(@bot, empty)` — yields exactly `小蕊1, 小蕊2`: `小义1` breaks the
+run, and the bot's own messages are somebody else speaking.
+
+**Coverage is never silent** — the count limit and the window can leave
+messages out; the injected block NAMES how many were left out and tells the
+agent to say so if they matter. An empty result is stated too, so the mention
+turn is never a content-less turn.
+
+**Render** — one text block, placed AFTER the identity block and any quote,
+BEFORE the user's own text (there is none):
+
+```
+[<sender alias> (<open_id>) @-mentioned you in this group without any text.
+These earlier messages from them were sent just before the mention and were
+NEVER delivered to you — oldest first]
+[1] <text of the oldest kept message>
+[2] <text>
+[2] [attachment: <name> — saved at <path>. You can read it with your file tools.]
+[<n> earlier message(s) from this sender were left out (limit: 10 messages
+within 10 minute(s)). Tell the user that earlier messages were not included if
+they matter.]
+[End of the earlier messages. If they do not say what the user wants, ask them
+instead of guessing.]
+```
+
+Content-less bubbles (an earlier bare mention) keep their place in the run but
+render no line. A recalled message renders `[recalled message <id>]`; a
+known-but-unhandled type renders its TYPE only. An attachment is downloaded
+through the SAME inbound seam as a quoted message's media (keyed by the
+EARLIER message's id) and named by real path, with NO `📎 File received`
+receipt — the user sent it earlier, not now.
+
+**Config** — `contextMerge: { enabled?, maxMessages?, windowMs? }`; default
+ON, `maxMessages` 10, `windowMs` 600000. `enabled: false` restores the exact
+pre-feature behavior (no block, no read, no buffer use).
+
+**Feishu scopes** — `im:message` (already granted) covers
+`im.v1.message.list`; `src/setup/feishu-manifest.json` is unchanged.
+
+**States & transitions** — no new state machine. Two per-chat maps: the
+inbound buffer (newest first) and the delivery watermark (the newest message
+already delivered to the agent, set in `deliverTurn` and `deliverQueuedTurn`
+right before `agent.followup`).
+
+| From | Event | To | Side effects |
+|---|---|---|---|
+| any | inbound message past dedup, not a slash line | buffered | buffer grows, oldest evicted past 50 |
+| any | message delivered to the agent | watermark moves | a later merge stops there |
+| group, @ + empty text | turn builds its content | merge block injected | history read only on a buffer miss |
+| group, @ + empty text, buffer miss | platform read fails or is unsupported | block still injected | loud `warn`; the turn runs without the earlier messages |
+| group, @ + empty text | feature disabled | no block | no read, no buffer use |
+
+**Failure modes**:
+- Platform read fails (scope, rate limit, not-in-chat): loud `warn`, the block
+  reports that no earlier message is available, and the turn still runs — a
+  merged context is an enhancement, never a gate.
+- Transport without `listRecentMessages` (an older build, a test double):
+  the same degradation, named as such in the log.
+- An earlier attachment whose download/save fails: a loud note INSIDE the
+  block; the turn is unaffected.
+- Privacy: a merge never crosses a different sender, so an allowlisted user's
+  turn cannot absorb a disallowed user's words.
+- History text arrives with inline `@_user_<n>` mention tokens (the platform
+  serializes mentions into the body): the surface's own `stripMentions` cleans
+  them exactly as it does for a live message.
+
+**Acceptance checklist**:
+- [x] A text-less group @-mention absorbs the sender's immediately preceding
+      messages, oldest first, in ONE turn (unit + integration)
+- [x] The run stops at another member's message (unit + integration)
+- [x] The run stops at the bot's own message (unit)
+- [x] The run stops at the delivery watermark — an already-delivered message
+      is never merged twice (unit + bridge)
+- [x] The count limit keeps the NEWEST messages and reports the dropped count
+      (unit + bridge)
+- [x] The window bound also counts as dropped, never as absent (unit)
+- [x] A buffer hit issues NO platform read; a buffer miss issues exactly one
+      (bridge)
+- [x] A failed/unsupported platform read still runs the turn, with the block
+      stating that no earlier message is available (bridge)
+- [x] A p2p empty message and a group @ with text get no merge block (bridge)
+- [x] `contextMerge.enabled: false` restores the previous behavior (bridge)
+- [x] An earlier attachment is reported by real path (the download-failure
+      note is covered by test; the success path is shared with inbound-quotes)
+- [x] `im:message` reused — manifest unchanged
+
+### Reference
+
+- `im.v1.message.list` (`GET /open-apis/im/v1/messages?container_id_type=chat
+  &container_id=<chat_id>&start_time=&end_time=&sort_type=ByCreateTimeDesc`)
+  returns `data.items[]` with `message_id` / `msg_type` / `create_time` /
+  `sender.id` / `sender.sender_type` / `body.content` / `deleted`. Time bounds
+  are SECONDS; the surface speaks epoch ms and converts at the seam.
+- The delivery watermark replaces "has the agent seen this?" — the session log
+  is the agent's memory, so the surface only tracks the frontier it has pushed.
+- Reusing the quoted-message media seam keeps ONE download/save path for
+  "content the user sent earlier" instead of two divergent ones.
+
 ## Part: inbound-rich-text
 
 > Feishu rich-text (`post`) and `video` messages are no longer silently

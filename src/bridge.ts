@@ -45,6 +45,13 @@ import type { SessionDetailView, SessionRowView } from './cards/session-list.js'
 import type { StreamingCardManager } from './cards/streaming.js';
 import { registerSurfaceCommands, type SurfaceCommandHost } from './commands/surface.js';
 import { CommandRegistry, type CommandResult, parseSlash } from './commands.js';
+import {
+  type ContextMergeLimits,
+  collectContextRun,
+  DEFAULT_CONTEXT_MERGE_MAX_MESSAGES,
+  DEFAULT_CONTEXT_MERGE_WINDOW_MS,
+  isContextWorthy,
+} from './context-merge.js';
 import { resolveDirectory } from './directory.js';
 import type {
   CardAction,
@@ -53,8 +60,9 @@ import type {
   FeishuTransport,
   InboundAttachment,
   QuotedMessage,
+  RecentChatMessage,
 } from './feishu/types.js';
-import { IdentityAliasStore, IDENTITY_PREFIX, identityBlockText } from './identity-aliases.js';
+import { IDENTITY_PREFIX, IdentityAliasStore, identityBlockText } from './identity-aliases.js';
 import { readLogFile } from './log-file.js';
 import { MessageDeduplicator } from './message-dedup.js';
 import { parseModelArg } from './model-args.js';
@@ -605,12 +613,31 @@ export interface BridgeOptions {
    * diagnostic / rollback switch).
    */
   readonly identityInjection?: boolean;
+  /**
+   * Inbound context merge: when a group message @-mentions the bot WITHOUT
+   * any text of its own, the sender's immediately preceding messages (which
+   * never passed the mention gate, so the agent never saw them) are merged
+   * into that turn. Default ON; `maxMessages` / `windowMs` bound the run.
+   */
+  readonly contextMerge?: {
+    readonly enabled?: boolean;
+    readonly maxMessages?: number;
+    readonly windowMs?: number;
+  };
 }
 
 /** Whether a group is a 1-person-1-bot solo group (mention gate relaxation). */
 function isSoloGroup(stats: { userCount: number; botCount: number }): boolean {
   return stats.userCount <= 1 && stats.botCount <= 1;
 }
+
+/**
+ * How many messages per chat the inbound buffer keeps
+ * (inbound-context-merge). Bounded so a busy group cannot grow it without
+ * limit; `collectContextRun`'s own `maxMessages` is the user-facing bound,
+ * and this cap only has to stay comfortably above it.
+ */
+const INBOUND_HISTORY_CAP = 50;
 
 /** Remove inline @-mention tokens from message text (Feishu renders each
  *  mention as `@_user_<n>` or `@<label>` inline, not always the `<at>`
@@ -715,6 +742,22 @@ export class Bridge {
    * the retained marker card after the item leaves the inbox).
    */
   private readonly queueCards = new Map<string, Map<string, QueueCardEntry>>();
+  /**
+   * The per-chat inbound history buffer (inbound-context-merge): the newest
+   * {@link INBOUND_HISTORY_CAP} messages the surface RECEIVED, newest first,
+   * recorded for every chat message that got past dedup — including the ones
+   * the group mention gate then drops, which is exactly the population the
+   * merge feature exists for. In-memory only: a restart starts empty and the
+   * platform-history fallback covers the gap.
+   */
+  private readonly inboundHistory = new Map<string, RecentChatMessage[]>();
+  /**
+   * The newest message id already DELIVERED to the agent, per chat
+   * (inbound-context-merge). The collected run stops there: everything older
+   * is already in the session, so merging it again would duplicate context
+   * the agent has read.
+   */
+  private readonly deliveredThrough = new Map<string, string>();
   /**
    * The surface-owned, in-memory queue of a chat's pending non-steer messages
    * (message-queue). Unlike `inbox.nextTurn` — which the agent loop auto-claims
@@ -945,6 +988,20 @@ export class Bridge {
    */
   async handleMessage(message: FeishuMessage): Promise<void> {
     if (!this.dedup.claim(message.messageId)) return;
+    // Feishu renders inline @-mentions as `@<label>` tokens. Strip them
+    // before dispatch so "@bot /help" (or a mention mid-text) parses as the
+    // slash command instead of falling into the working-directory gate as a
+    // plain message. The agent also sees the cleaned text.
+    const text = stripMentions(message.text);
+    const slash = parseSlash(text);
+    // Inbound-context-merge: remember what was SAID in this chat BEFORE the
+    // mention gate decides whether to answer — the messages the gate drops
+    // are precisely the ones a later text-less @-mention needs. Recorded
+    // here (not after the gate) and before any await, so a burst of
+    // messages keeps its arrival order and no concurrent delivery observes a
+    // half-filled buffer. Slash lines are instructions to the bot, not
+    // conversation, so they are not recorded.
+    if (slash === undefined) this.rememberInboundMessage(message, text);
     if (!(await this.shouldRespond(message))) return;
     // A known-but-unhandled Feishu message type (folder, sticker, …) gets a
     // loud notice instead of vanishing — the user must learn the bot cannot
@@ -964,12 +1021,6 @@ export class Bridge {
     this.options.logger.info(
       `inbound message ${message.messageId} in ${message.chatId} (${message.chatType}): ${message.text.slice(0, 80)}`,
     );
-    // Feishu renders inline @-mentions as `@<label>` tokens. Strip them
-    // before dispatch so "@bot /help" (or a mention mid-text) parses as the
-    // slash command instead of falling into the working-directory gate as a
-    // plain message. The agent also sees the cleaned text.
-    const text = stripMentions(message.text);
-    const slash = parseSlash(text);
     if (slash !== undefined) {
       this.options.logger.debug(
         `message ${message.messageId} -> slash command /${slash.name} (chat ${message.chatId})`,
@@ -1896,6 +1947,9 @@ export class Bridge {
     const cwd = this.options.sessionMap.cwdFor(message.chatId) ?? this.options.defaultCwd;
     const agent = await this.resolveAgent(message.chatId, sessionId, cwd);
     this.options.logger.info(`delivering message ${message.messageId} to agent`);
+    // Inbound-context-merge watermark: everything up to this message is now
+    // in the session, so a later text-less @-mention must NOT merge it again.
+    this.deliveredThrough.set(message.chatId, message.messageId);
     agent.followup(
       createUserMessage({
         content,
@@ -2169,6 +2223,8 @@ export class Bridge {
     const cwd = this.options.sessionMap.cwdFor(chatId) ?? this.options.defaultCwd;
     const agent = await this.resolveAgent(chatId, sessionId, cwd);
     this.options.logger.info(`delivering queued message ${item.message.id} to agent`);
+    // Same watermark as a direct turn: the queued message is now delivered.
+    this.deliveredThrough.set(chatId, source.messageId);
     agent.followup(item.message);
     this.options.logger.debug(`queue drain (chat ${chatId}): delivered ${item.message.id} -> sent`);
   }
@@ -2291,6 +2347,218 @@ export class Bridge {
   }
 
   /**
+   * Record one inbound message in the chat's history buffer
+   * (inbound-context-merge). Called for EVERY message that got past dedup —
+   * before the mention gate — because the gate-dropped messages are exactly
+   * the ones a later text-less @-mention has to absorb. Keeps the newest
+   * {@link INBOUND_HISTORY_CAP} entries.
+   * @param message - the normalized inbound message.
+   * @param text - its mention-stripped text (the form the agent would see).
+   */
+  private rememberInboundMessage(message: FeishuMessage, text: string): void {
+    const entry: RecentChatMessage = {
+      messageId: message.messageId,
+      senderOpenId: message.senderOpenId,
+      senderType: 'user',
+      text,
+      attachments: message.attachments ?? [],
+      ...(message.unsupportedType !== undefined
+        ? { unsupportedType: message.unsupportedType }
+        : {}),
+      createdAt: message.createdAt,
+    };
+    const history = this.inboundHistory.get(message.chatId) ?? [];
+    // Same-millisecond arrivals keep their arrival order: the buffer is
+    // newest-first and the newest entry wins the slot at the front.
+    history.unshift(entry);
+    if (history.length > INBOUND_HISTORY_CAP) history.length = INBOUND_HISTORY_CAP;
+    this.inboundHistory.set(message.chatId, history);
+    this.options.logger.debug(
+      `inbound history +${message.messageId} (chat ${message.chatId}, ${history.length} buffered)`,
+    );
+  }
+
+  /** The context-merge bounds, resolved from the options with defaults. */
+  private contextMergeLimits(): ContextMergeLimits {
+    return {
+      maxMessages: this.options.contextMerge?.maxMessages ?? DEFAULT_CONTEXT_MERGE_MAX_MESSAGES,
+      windowMs: this.options.contextMerge?.windowMs ?? DEFAULT_CONTEXT_MERGE_WINDOW_MS,
+    };
+  }
+
+  /**
+   * Whether this message is the trigger for an inbound context merge: a
+   * GROUP message that @-mentioned the bot (the transport's gate already
+   * accepted it) with no text and no attachment of its own — "just the
+   * mention". A bare attachment is excluded: that message carries its own
+   * content and is handled by the inbound-attachment path.
+   * @param message - the normalized inbound message.
+   * @returns whether the merge applies.
+   */
+  private isContextMergeTrigger(message: FeishuMessage): boolean {
+    if (this.options.contextMerge?.enabled === false) return false;
+    if (message.chatType !== 'group') return false;
+    if (stripMentions(message.text) !== '') return false;
+    return (message.attachments?.length ?? 0) === 0;
+  }
+
+  /**
+   * Build the merged "earlier messages from this sender" block for a
+   * text-less group @-mention (inbound-context-merge).
+   *
+   * The agent never saw those messages (the mention gate drops un-@ group
+   * messages), so the mention alone would reach it as an empty request. The
+   * block states the coverage explicitly — including how many messages the
+   * limits left out — so truncation is never silent, and it names the
+   * senders by alias so the agent knows who is speaking.
+   * @param message - the trigger message.
+   * @returns the merged block, or `undefined` when this is not a trigger.
+   */
+  private async mergedContextBlock(message: FeishuMessage): Promise<ContentBlock | undefined> {
+    if (!this.isContextMergeTrigger(message)) return undefined;
+    const limits = this.contextMergeLimits();
+    const history = await this.collectEarlierMessages(message, limits);
+    const outcome = collectContextRun(
+      history ?? [],
+      {
+        messageId: message.messageId,
+        senderOpenId: message.senderOpenId,
+        createdAt: message.createdAt,
+        ...(this.deliveredThrough.get(message.chatId) !== undefined
+          ? { deliveredThroughMessageId: this.deliveredThrough.get(message.chatId) as string }
+          : {}),
+      },
+      limits,
+    );
+    const alias = this.identityAliases.lookup(message.senderOpenId);
+    const sender =
+      alias === undefined
+        ? message.senderOpenId === ''
+          ? 'the sender'
+          : message.senderOpenId
+        : `${alias.name} (${message.senderOpenId})`;
+    const worth = outcome.messages.filter((entry) => isContextWorthy(entry));
+    const lines = [
+      `[${sender} @-mentioned you in this group without any text. ` +
+        `These earlier messages from them were sent just before the mention and were NEVER delivered to you — oldest first]`,
+    ];
+    if (worth.length === 0) {
+      lines.push(
+        '[No earlier message from this sender is available — either none arrived in the ' +
+          'look-back window, or you have already been given them.]',
+      );
+    }
+    let index = 0;
+    for (const entry of outcome.messages) {
+      if (!isContextWorthy(entry)) continue;
+      index += 1;
+      if (entry.recalled === true) {
+        lines.push(
+          `[${index}] [recalled message ${entry.messageId} — its content is not available]`,
+        );
+        continue;
+      }
+      if (entry.unsupportedType !== undefined) {
+        lines.push(
+          `[${index}] [a message of a type this surface cannot read: ${entry.unsupportedType}]`,
+        );
+        continue;
+      }
+      if (entry.text !== '') lines.push(`[${index}] ${entry.text}`);
+      for (const attachment of entry.attachments) {
+        // The resource endpoint is keyed by the OWNING message, so the
+        // earlier message's own id drives the download (same rule as a
+        // quoted message's media).
+        const pending = await this.saveInboundFileAttachment(
+          { ...message, messageId: entry.messageId },
+          attachment,
+        );
+        lines.push(
+          pending.savedPath === undefined
+            ? `[${index}] [attachment: ${pending.name} — download failed, the content is not available]`
+            : `[${index}] [attachment: ${pending.name} — saved at ${pending.savedPath}. You can read it with your file tools.]`,
+        );
+      }
+    }
+    if (outcome.droppedCount > 0) {
+      lines.push(
+        `[${outcome.droppedCount} earlier message(s) from this sender were left out (limit: ` +
+          `${limits.maxMessages} messages within ${Math.round(limits.windowMs / 60_000)} minute(s)). ` +
+          `Tell the user that earlier messages were not included if they matter.]`,
+      );
+    }
+    lines.push(
+      '[End of the earlier messages. If they do not say what the user wants, ask them instead of guessing.]',
+    );
+    this.options.logger.debug(
+      `context merge ${message.messageId}: ${worth.length} message(s) merged, ` +
+        `${outcome.droppedCount} dropped (chat ${message.chatId})`,
+    );
+    return { type: 'text', text: lines.join('\n') };
+  }
+
+  /**
+   * Read the earlier messages a context merge selects from: the surface's own
+   * inbound buffer when it holds a preceding message from the sender, the
+   * platform history API (`im.v1.message.list`) when it does not — a fresh
+   * process, or history older than the buffer.
+   *
+   * A failed platform read degrades LOUDLY to "no context": the mention turn
+   * still runs (a merged context is an enhancement, never a gate).
+   * @param message - the trigger message.
+   * @param limits - the resolved merge bounds (also the window queried).
+   * @returns the candidate history, newest first.
+   */
+  private async collectEarlierMessages(
+    message: FeishuMessage,
+    limits: ContextMergeLimits,
+  ): Promise<readonly RecentChatMessage[] | undefined> {
+    const buffered = this.inboundHistory.get(message.chatId) ?? [];
+    const hasPreceding = buffered.some(
+      (entry) =>
+        entry.messageId !== message.messageId &&
+        entry.createdAt <= message.createdAt &&
+        entry.senderOpenId === message.senderOpenId,
+    );
+    if (hasPreceding) {
+      this.options.logger.debug(
+        `context merge ${message.messageId}: ${buffered.length} buffered message(s) (chat ${message.chatId})`,
+      );
+      return buffered;
+    }
+    const read = this.options.transport.listRecentMessages;
+    if (read === undefined) {
+      this.options.logger.warn(
+        `context merge ${message.messageId}: no buffered context and the transport cannot read ` +
+          `chat history (chat ${message.chatId})`,
+      );
+      return undefined;
+    }
+    const history = await read.call(this.options.transport, message.chatId, {
+      since: message.createdAt - limits.windowMs,
+      until: message.createdAt,
+      // One platform page is enough for a contiguous run that starts at the
+      // trigger; the cap also bounds the response the surface must parse.
+      max: INBOUND_HISTORY_CAP,
+    });
+    if (history === undefined) {
+      this.options.logger.warn(
+        `context merge ${message.messageId}: chat history unavailable (chat ${message.chatId})`,
+      );
+      return undefined;
+    }
+    // History text keeps its inline `@_user_<n>` mention tokens (the platform
+    // serializes mentions into the body); the surface's own `stripMentions`
+    // is what turns them into readable prose, exactly as it does for a live
+    // message.
+    const normalised = history.map((entry) => ({ ...entry, text: stripMentions(entry.text) }));
+    this.options.logger.debug(
+      `context merge ${message.messageId}: ${normalised.length} message(s) from chat history (chat ${message.chatId})`,
+    );
+    return normalised;
+  }
+
+  /**
    * Build the agent-visible content blocks for one inbound message. Text
    * messages pass through unchanged. The identity block comes FIRST (who is
    * speaking — it frames everything after it). A reply/quote contributes the
@@ -2314,6 +2582,11 @@ export class Bridge {
     if (message.quoted !== undefined) {
       blocks.push(...(await this.quotedContent(message, message.quoted)));
     }
+    // Inbound-context-merge: a group @-mention with NO text of its own gets
+    // the sender's immediately preceding messages (which the mention gate
+    // dropped when they were sent) merged in ahead of the mention itself.
+    const merged = await this.mergedContextBlock(message);
+    if (merged !== undefined) blocks.push(merged);
     if (message.text !== '') blocks.push({ type: 'text', text: message.text });
     // `attachments` is always present on normalized messages; the guard
     // covers transport-level JSON without the field (defensive only).
@@ -2700,7 +2973,10 @@ export class Bridge {
     // down for this session — otherwise the same text folds twice. The
     // synthesised frame event in {@link Bridge.handleAssistantStreamChunk} has
     // no `seq`, which is exactly how the two are told apart here.
-    if (event.type === 'assistant/chunk' && (event as { readonly seq?: number }).seq !== undefined) {
+    if (
+      event.type === 'assistant/chunk' &&
+      (event as { readonly seq?: number }).seq !== undefined
+    ) {
       this.durableChunkSessions.add(sessionId);
     }
     this.options.logger.debug(`session event ${event.type} from ${sessionId}`);

@@ -709,6 +709,130 @@ is not available]`）。
 - `parseMessageBody` 与实时入站路径共用是刻意的：被引用的 `post` 必须与实时
   的 `post` 说同一套占位符/附件语言。
 
+## Part: inbound-context-merge
+
+> 飞书用户常连发好几条消息，只在**最后一条**@机器人——有时那条还是**空消息**
+> （只有 @，没有正文）。前面几条从未通过群 @ 门禁，agent 根本没见过；于是这次
+> @ 的 turn 里没有任何指令。本部分把该发送者紧邻的前几条消息合并进这一轮。
+
+### 预期行为
+
+**触发** —— 一条**群聊**消息，通过了 @ 门禁，且去掉 @ 之后自身正文为空、也没
+有附件（即"只 @ 了一下"）。三种近似情形**刻意不触发**：
+
+| 消息 | 是否合并 | 原因 |
+|---|---|---|
+| 私聊、空正文 | 否 | 私聊没有 @ 门禁，没有消息被丢弃，也就无需找回 |
+| 群聊 @ + 有正文 | 否 | 用户已经把话说清了；agent 已有的更早消息保持原样 |
+| 群聊 @ + 只有附件、无正文 | 否 | 附件本身就是那条消息，走 inbound-attachments 路径 |
+
+**来源：先本地缓冲，再平台历史** —— surface 自己维护每聊天的入站缓冲，只有缓冲
+答不上来时才读平台：
+
+| 顺序 | 来源 | 何时使用 | 代价 |
+|---|---|---|---|
+| 1 | 进程内入站缓冲 | 其中已有该发送者更早的一条消息 | 无（不发 API） |
+| 2 | `im.v1.message.list` | 缓冲未命中：进程刚起来，或历史早于缓冲 | 每次合并一次飞书读取 |
+
+缓冲记录**每一条**通过去重的入站消息——**包括随后被 @ 门禁丢弃的那些**，而这正是
+本功能要覆盖的人群。每聊天最多保留最新 50 条，且仅存在于内存：重启后为空，由平台
+读取兜底。斜杠命令不入缓冲（命令是给机器人的指令，不是要合并的对话）。
+
+**选取规则** —— `collectContextRun`（纯函数，`src/context-merge.ts`）从触发消息
+起**由新到旧**回溯，遇到下列任一条件即停止：
+
+| 停止条件 | 含义 |
+|---|---|
+| 换了发送者 | 别的成员（**或机器人自己**）说过话；越过它会把从未发生的对话拼接在一起 |
+| 投递水位线 | 该聊天**已经投递给 agent** 的最新消息——它已在会话里，再合并就是重复 agent 读过的上下文 |
+| 条数上限 | `maxMessages`（默认 10） |
+| 时间窗口 | 触发前 `windowMs`（默认 10 分钟） |
+
+比触发消息更新的消息、触发消息本身及其 id 永不进入结果。用户举的场景——
+`机器人1, 机器人2, 小义1, 小蕊1, 小蕊2, 小蕊3(@机器人, 空)`——恰好得到
+`小蕊1, 小蕊2`：`小义1` 截断回溯，机器人自己的消息属于"别人说话"。
+
+**覆盖情况绝不静默** —— 条数上限与时间窗口都可能漏掉消息；注入块会**写明**漏了
+几条，并要求 agent 在用户在意时说明。结果为空也会明说，因此这次 @ 的 turn 永不
+成为"没有任何内容"的 turn。
+
+**渲染** —— 一个文本块，位置在身份块与引用块**之后**、用户自身文字**之前**
+（此处没有文字）：
+
+```
+[<sender alias> (<open_id>) @-mentioned you in this group without any text.
+These earlier messages from them were sent just before the mention and were
+NEVER delivered to you — oldest first]
+[1] <最旧一条的正文>
+[2] <正文>
+[2] [attachment: <name> — saved at <path>. You can read it with your file tools.]
+[<n> earlier message(s) from this sender were left out (limit: 10 messages
+within 10 minute(s)). Tell the user that earlier messages were not included if
+they matter.]
+[End of the earlier messages. If they do not say what the user wants, ask them
+instead of guessing.]
+```
+
+无内容的气泡（更早的一次裸 @）仍占据回溯位置，但不渲染任何行。已撤回消息渲染
+`[recalled message <id>]`；已知但不支持的类型只渲染**类型**。附件通过与"引用消息
+媒体"**同一条**入站 seam 下载（以**那条更早消息**的 id 为参数），并以真实路径给出，
+且**不发** `📎 File received` 回执——那是用户更早发的，不是现在发的。
+
+**配置** —— `contextMerge: { enabled?, maxMessages?, windowMs? }`；默认开启，
+`maxMessages` 10、`windowMs` 600000。`enabled: false` 完全恢复本功能之前的行为
+（不注入、不读取、不用缓冲）。
+
+**飞书 scope** —— 现有 `im:message`（已授权）已覆盖 `im.v1.message.list`；
+`src/setup/feishu-manifest.json` 不变。
+
+**状态与迁移** —— 没有新增状态机。新增两个按聊天存放的 Map：入站缓冲（新→旧）
+与投递水位线（该聊天已投递给 agent 的最新消息，在 `deliverTurn` 与
+`deliverQueuedTurn` 里于 `agent.followup` 之前写入）。
+
+| 起点 | 事件 | 终点 | 副作用 |
+|---|---|---|---|
+| 任意 | 过去重、非斜杠的入站消息 | 入缓冲 | 缓冲增长，超过 50 条淘汰最旧 |
+| 任意 | 消息投递给 agent | 水位线前移 | 之后的合并在此截断 |
+| 群聊、@ + 空正文 | 组装 turn 内容 | 注入合并块 | 仅缓冲未命中时才读书平台历史 |
+| 群聊、@ + 空正文、缓冲未命中 | 平台读取失败或 transport 不支持 | 仍注入合并块 | 响亮 `warn`；turn 照常运行，只是没有更早消息 |
+| 群聊、@ + 空正文 | 功能已关闭 | 不注入 | 不读取、不用缓冲 |
+
+**失败模式**：
+- 平台读取失败（scope、限频、不在群内）：响亮 `warn`，块里说明取不到更早消息，
+  turn 照常运行——合并上下文是增强项，**永远不是门禁**。
+- transport 没有 `listRecentMessages`（旧构建、测试替身）：同样的降级，日志里
+  明确写出原因。
+- 更早消息的附件下载/落盘失败：块**内部**一条响亮备注；turn 不受影响。
+- 隐私：合并绝不跨越其他发送者，因此被允许用户的 turn 不会吸收被拒用户的话。
+- 平台历史正文里带着内联 `@_user_<n>` 占位符（平台把 @ 序列化进 body）：由 surface
+  自己的 `stripMentions` 清洗，与实时消息完全一致。
+
+**验收清单**：
+- [x] 群聊空正文 @ 把该发送者紧邻的前几条消息按"旧→新"合并进**同一轮**（单元 + 集成）
+- [x] 回溯在别的成员发言处停止（单元 + 集成）
+- [x] 回溯在机器人自己的消息处停止（单元）
+- [x] 回溯在投递水位线处停止——已投递过的消息绝不重复合并（单元 + bridge）
+- [x] 条数上限保留**最新**若干条，并报告被丢弃的条数（单元 + bridge）
+- [x] 时间窗口同样计入"被丢弃"，而不是当作"不存在"（单元）
+- [x] 缓冲命中时**不发**平台读取；缓冲未命中时恰好发一次（bridge）
+- [x] 平台读取失败/不支持时 turn 照常运行，块里说明取不到更早消息（bridge）
+- [x] 私聊空正文与"群聊 @ + 有正文"都不注入合并块（bridge）
+- [x] `contextMerge.enabled: false` 恢复既有行为（bridge）
+- [x] 更早消息的附件以真实路径给出（下载失败备注已有测试；成功路径与 inbound-quotes 共用）
+- [x] 复用 `im:message`——manifest 不变
+
+### 参考
+
+- `im.v1.message.list`（`GET /open-apis/im/v1/messages?container_id_type=chat
+  &container_id=<chat_id>&start_time=&end_time=&sort_type=ByCreateTimeDesc`）
+  返回 `data.items[]`，字段为 `message_id` / `msg_type` / `create_time` /
+  `sender.id` / `sender.sender_type` / `body.content` / `deleted`。时间参数是
+  **秒**；surface 内部用毫秒，在 seam 处换算。
+- 投递水位线取代了"agent 见过这条吗"的判断——会话日志就是 agent 的记忆，surface
+  只需跟踪自己已经推进到的前沿。
+- 复用引用消息的媒体 seam，让"用户更早发的内容"只有**一条**下载/落盘路径，
+  而不是两条会各自漂移的实现。
+
 ## Part: turn-produced-files
 
 > turn 结束后，流式卡列出 agent 产出的文件（write/edit 变更）为可点击 chips；
