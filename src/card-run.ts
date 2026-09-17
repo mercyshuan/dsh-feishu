@@ -154,16 +154,27 @@ export function parseCardRunRequest(
 
 /**
  * Substitute whole-argument placeholders.
+ *
+ * A `{form.<name>}` the client did NOT submit resolves to an EMPTY argument
+ * instead of a refusal: an untouched field is legitimately absent from
+ * `form_value` (and a card whose prompt input is optional never sends it at
+ * all), so refusing would break the button outright. The missing keys are
+ * reported back so the caller can log them — silently shortening argv is how a
+ * command ends up running against the wrong arguments. An unknown NON-form
+ * placeholder (`{nope}`) is still refused: that is a card-authoring bug, not
+ * client behavior.
  * @param template - the argument template (config args first, then the card's).
  * @param context - the resolved sources (`{card}`, `{chat}`, `{operator}`,
  *   `{form.<key>}`).
- * @returns the argv, or a refusal naming the bad placeholder/argument.
+ * @returns the argv plus the form keys the client did not send, or a refusal
+ *   naming the bad placeholder/argument.
  */
 export function resolveRunArgs(
   template: readonly string[],
   context: CardRunContext,
-): { ok: true; args: string[] } | { ok: false; detail: string } {
+): { ok: true; args: string[]; missingForm: string[] } | { ok: false; detail: string } {
   const args: string[] = [];
+  const missingForm: string[] = [];
   for (const raw of template) {
     const match = PLACEHOLDER.exec(raw);
     let value = raw;
@@ -175,10 +186,8 @@ export function resolveRunArgs(
       else if (key.startsWith('form.')) {
         const field = key.slice('form.'.length);
         const fromForm = context.formValue[field];
-        if (fromForm === undefined) {
-          return { ok: false, detail: `unknown form field "${field}" in {${key}}` };
-        }
-        value = fromForm;
+        if (fromForm === undefined) missingForm.push(field);
+        value = fromForm ?? '';
       } else {
         return { ok: false, detail: `unknown placeholder {${key}}` };
       }
@@ -189,7 +198,7 @@ export function resolveRunArgs(
     }
     args.push(value);
   }
-  return { ok: true, args };
+  return { ok: true, args, missingForm };
 }
 
 /** One in-flight run, keyed by chat. */
@@ -271,6 +280,13 @@ export class CardCommandRunner {
     }
     const resolved = resolveRunArgs([...(spec.args ?? []), ...request.args], context);
     if (!resolved.ok) return { ok: false, code: 'invalid', detail: resolved.detail };
+    if (resolved.missingForm.length > 0) {
+      // Not fatal (an untouched field is empty), but never silent: the command
+      // is about to run with those arguments blanked out.
+      this.logger.warn(
+        `card command "${request.name}": form fields not submitted, passed empty: ${resolved.missingForm.join(', ')}`,
+      );
+    }
 
     const file = spec.file ?? this.nodePath;
     let fd: number | undefined;

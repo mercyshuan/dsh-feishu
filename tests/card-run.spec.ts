@@ -92,9 +92,23 @@ describe('resolveRunArgs', () => {
     if (resolved.ok) expect(resolved.args).toEqual(['; rm -rf / #']);
   });
 
-  it('refuses unknown placeholders and unknown form fields', () => {
+  it('refuses unknown non-form placeholders but blanks an unsubmitted form field', () => {
+    // A placeholder that is not a known source is a card-authoring bug: refuse.
     expect(resolveRunArgs(['{nope}'], context).ok).toBe(false);
-    expect(resolveRunArgs(['{form.missing}'], context).ok).toBe(false);
+    // A form field the client did not send is client behavior: pass it empty and
+    // REPORT it, so the caller can log that the argument was blanked out.
+    const resolved = resolveRunArgs(['--prompt', '{form.missing}'], context);
+    expect(resolved.ok).toBe(true);
+    if (resolved.ok) {
+      expect(resolved.args).toEqual(['--prompt', '']);
+      expect(resolved.missingForm).toEqual(['missing']);
+    }
+  });
+
+  it('reports no missing form fields when the client sent them all', () => {
+    const resolved = resolveRunArgs(['{form.prompt}', '{form.width}'], context);
+    expect(resolved.ok).toBe(true);
+    if (resolved.ok) expect(resolved.missingForm).toEqual([]);
   });
 
   it('leaves a non-placeholder argument verbatim', () => {
