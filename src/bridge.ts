@@ -24,6 +24,7 @@ import {
   type UserMessage,
 } from '@deepseek-ai/dsh-llm';
 import type { SessionEvent } from '@deepseek-ai/dsh-session';
+import { CardCommandRunner, type CardCommandSpec, parseCardRunRequest } from './card-run.js';
 import {
   InteractionCardController,
   type InteractionCardHost,
@@ -466,6 +467,12 @@ export interface BridgeOptions {
    */
   readonly allowedUsers?: readonly string[];
   /**
+   * Allowlisted local commands a card button may run directly
+   * (`kind: 'run'`). Empty/absent disables the seam entirely, so a deploy that
+   * does not need it grants nothing. See {@link CardCommandRunner}.
+   */
+  readonly cardCommands?: readonly CardCommandSpec[];
+  /**
    * DSH slash-command passthrough: execute `line` against the chat's live
    * agent through the dsh command registry. Absent, registry commands are
    * not available (every unknown slash line falls to the unknown policy).
@@ -688,6 +695,9 @@ interface QueueCardEntry {
    *  re-delivered turn can open its streaming card with the real ack id and
    *  restore the proactive @-mention target. */
   feishu: FeishuMessage;
+  /** Carry the quiet flag across the queue: a queued external-card action must
+   *  still run WITHOUT opening its own card when it is re-delivered later. */
+  quiet?: boolean;
 }
 
 /**
@@ -813,12 +823,18 @@ export class Bridge {
   private readonly durableChunkSessions = new Set<string>();
   private readonly disposeAssistantStream: (() => void) | undefined;
   private readonly commands = new CommandRegistry();
+  /** The card-button command seam (empty allowlist ⇒ nothing can run). */
+  private readonly cardRunner: CardCommandRunner;
 
   constructor(private readonly options: BridgeOptions) {
     this.streaming = new StreamingCardController(this.streamingHost());
     this.panel = new PanelController(this.panelHost());
     this.interactions = new InteractionCardController(this.interactionHost());
     this.identityAliases = new IdentityAliasStore(this.identityAliasesPath(), options.logger);
+    this.cardRunner = new CardCommandRunner(options.cardCommands ?? [], {
+      logger: options.logger,
+      logDir: join(options.dataDir, 'card-runs'),
+    });
     options.transport.onMessage((message) => {
       void this.handleMessage(message).catch((error: unknown) => {
         options.logger.error(`feishu message handling failed: ${String(error)}`);
@@ -1871,8 +1887,18 @@ export class Bridge {
     }
   }
 
-  /** The normal turn flow: session resolution, streaming card, followup. */
-  private async deliverTurn(message: FeishuMessage): Promise<void> {
+  /**
+   * The normal turn flow: session resolution, streaming card, followup.
+   * @param message - the accepted inbound message (or an external card action
+   *   packaged as one).
+   * @param options.quiet - run the turn WITHOUT opening a streaming card or
+   *   reacting (see {@link StreamingCardController.beginTurn}); used by
+   *   {@link Bridge.handleCardPromptAction}, where the external card is the UI.
+   */
+  private async deliverTurn(
+    message: FeishuMessage,
+    options: { readonly quiet?: boolean } = {},
+  ): Promise<void> {
     // A free-text question answer is captured here — the reply is the
     // answer, not a turn (bypasses the working-directory gate).
     if (this.interactions.answerFreeText(message.chatId, message.text)) {
@@ -1918,6 +1944,7 @@ export class Bridge {
         text: queueMessageText(queued),
         message: queued,
         feishu: message,
+        ...(options.quiet === true ? { quiet: true } : {}),
       };
       this.queueCardEntries(message.chatId).set(queued.id, entry);
       this.queuedFor(message.chatId).push(entry);
@@ -1942,7 +1969,9 @@ export class Bridge {
     // Two-stage ack stage 1 + the working card state + the card open (the
     // streaming controller's beginTurn; a failed reaction or card post must
     // never block the turn).
-    await this.streaming.beginTurn(message.chatId, message.messageId, turnTitle(message.text));
+    await this.streaming.beginTurn(message.chatId, message.messageId, turnTitle(message.text), {
+      quiet: options.quiet === true,
+    });
     const sessionId = this.options.sessionMap.ensure(message.chatId);
     const cwd = this.options.sessionMap.cwdFor(message.chatId) ?? this.options.defaultCwd;
     const agent = await this.resolveAgent(message.chatId, sessionId, cwd);
@@ -2218,7 +2247,9 @@ export class Bridge {
     this.requesterOpenIds.set(chatId, source.senderOpenId);
     this.chatTypes.set(chatId, source.chatType === 'group' ? 'group' : 'p2p');
     this.streaming.rememberPrompt(chatId, item.text);
-    await this.streaming.beginTurn(chatId, source.messageId, turnTitle(item.text));
+    await this.streaming.beginTurn(chatId, source.messageId, turnTitle(item.text), {
+      quiet: item.quiet === true,
+    });
     const sessionId = this.options.sessionMap.ensure(chatId);
     const cwd = this.options.sessionMap.cwdFor(chatId) ?? this.options.defaultCwd;
     const agent = await this.resolveAgent(chatId, sessionId, cwd);
@@ -3102,9 +3133,121 @@ export class Bridge {
         await this.handleQueueCardAction(action);
         break;
       }
+      case 'agent-prompt': {
+        // A card this surface did NOT render (an external card, e.g. one a
+        // skill created through lark-cli) asks the surface to run a prompt.
+        // The button carries `value.prompt`; form controls arrive as
+        // `action.formValue`. The turn is dispatched so the agent can act on
+        // it, and the envelope names the card so the agent can update it.
+        await this.handleCardPromptAction(action);
+        break;
+      }
+      case 'run': {
+        // The other half of the external-card seam: run an ALLOWLISTED local
+        // command directly, with no agent turn (no token cost, no latency, and
+        // no model judgment between a chat button and a local tool). See
+        // {@link CardCommandRunner} for the security envelope.
+        await this.handleCardRunAction(action);
+        break;
+      }
       default: {
         this.options.logger.warn(`unknown card action kind: ${kind ?? '(missing)'}`);
       }
+    }
+  }
+
+  /**
+   * Turn an externally authored card button into a user turn.
+   *
+   * The card is created outside this surface (a skill renders it through
+   * lark-cli), so the surface has no card state machine for it. The button's
+   * `value.prompt` is the instruction its author wrote; `action.formValue`
+   * carries whatever the user typed into the card's form controls. Both are
+   * packed into the turn text together with an envelope naming the card
+   * (`card` = the card message id, so the agent can patch it) and the
+   * operator. Delivered through {@link Bridge.deliverTurn} — NOT
+   * `handleMessage` — because a button click is by construction addressed to
+   * the bot: the group @-mention gate must not drop it, and a click is not
+   * conversation material for the inbound-context buffer.
+   * @param action - the normalized card callback.
+   */
+  private async handleCardPromptAction(action: CardAction): Promise<void> {
+    const instruction = typeof action.value.prompt === 'string' ? action.value.prompt : '';
+    const envelope = {
+      chat: action.chatId,
+      card: action.messageId,
+      operator: action.operatorOpenId,
+      action: action.value.action ?? '',
+      value: action.value,
+      form: action.formValue ?? {},
+    };
+    const message: FeishuMessage = {
+      // Unique per click: the user may legitimately press the same button
+      // twice, and the id is only a dedup key for platform retries.
+      messageId: `card-action-${action.messageId}-${Date.now()}`,
+      chatId: action.chatId,
+      chatType: this.chatTypes.get(action.chatId) ?? 'p2p',
+      senderOpenId: action.operatorOpenId,
+      text: `${instruction}\n\n[feishu-card-action] ${JSON.stringify(envelope)}`,
+      mentions: [],
+      attachments: [],
+      createdAt: Date.now(),
+    };
+    this.options.logger.info(
+      `card action ${envelope.action || '(none)'} -> user turn (chat ${action.chatId}, card ${action.messageId})`,
+    );
+    // Quiet: the external card IS this turn's UI (its skill patches it with the
+    // run log), so the surface must not post a second streaming bubble or
+    // react. A failed turn still posts an error notice.
+    await this.deliverTurn(message, { quiet: true });
+  }
+
+  /**
+   * Run one allowlisted local command for an external card's button.
+   *
+   * No agent turn is involved: the card IS the UI, and the command it names is
+   * responsible for patching its own progress onto the card. Every refusal and
+   * every spawn failure is reported into the chat — a button that silently does
+   * nothing is exactly the failure this seam exists to avoid.
+   * @param action - the normalized card callback.
+   */
+  private async handleCardRunAction(action: CardAction): Promise<void> {
+    const parsed = parseCardRunRequest(action.value as Readonly<Record<string, unknown>>);
+    const notify = async (text: string): Promise<void> => {
+      try {
+        await this.options.transport.sendText(action.chatId, text);
+      } catch (error: unknown) {
+        this.options.logger.warn(`card run notice failed: ${String(error)}`);
+      }
+    };
+    if (!parsed.ok) {
+      this.options.logger.warn(`card run refused (malformed payload): ${parsed.detail}`);
+      await notify(t('cardRun.invalid', { detail: parsed.detail }));
+      return;
+    }
+    const outcome = this.cardRunner.run(parsed.request, {
+      chatId: action.chatId,
+      messageId: action.messageId,
+      operatorOpenId: action.operatorOpenId,
+      formValue: action.formValue ?? {},
+    });
+    if (outcome.ok) {
+      this.options.logger.info(
+        `card run "${parsed.request.name}" -> pid ${outcome.pid} (card ${action.messageId})`,
+      );
+      return;
+    }
+    this.options.logger.warn(
+      `card run "${parsed.request.name}" refused (${outcome.code}): ${outcome.detail}`,
+    );
+    if (outcome.code === 'not-allowed') {
+      await notify(t('cardRun.notAllowed', { name: parsed.request.name }));
+    } else if (outcome.code === 'busy') {
+      await notify(t('cardRun.busy', { name: outcome.detail }));
+    } else if (outcome.code === 'invalid') {
+      await notify(t('cardRun.invalid', { detail: outcome.detail }));
+    } else {
+      await notify(t('cardRun.failed', { name: parsed.request.name, detail: outcome.detail }));
     }
   }
 

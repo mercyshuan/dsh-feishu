@@ -46,6 +46,8 @@ import {
   type PlanModeService,
   type SessionListRow,
 } from './bridge.js';
+import type { CardCommandConfig } from './card-run.js';
+import { normalizeCardCommands } from './card-run.js';
 import { StreamingCardManager } from './cards/streaming.js';
 import type { CommandResult } from './commands.js';
 import { consoleExporter } from './console-exporter.js';
@@ -120,6 +122,15 @@ export interface Config {
    */
   readonly requireWorkingDir?: boolean;
   /**
+   * Allowlisted local commands an external card's button may run directly
+   * (`value.kind === 'run'`). Absent/empty means the seam is OFF: a card can
+   * then only ask for an agent turn (`kind: 'agent-prompt'`). Each entry names
+   * one command; the card references it by `name` and supplies only ARGUMENTS —
+   * the executable, its fixed args and the cwd always come from here, so a card
+   * can never point the surface at an arbitrary path (see `card-run.ts`).
+   */
+  readonly cardCommands?: CardCommandConfig[];
+  /**
    * UI language for everything the bot says on the Feishu surface (cards,
    * panels, command labels, gate notices). Default `en-US`. Falls back to
    * the `FEISHU_LOCALE` environment variable.
@@ -184,6 +195,16 @@ export const Config: z<Config> = z.object({
   unknownCommand: z.union([z.const('error'), z.const('passthrough')]).required(false),
   repoRoots: z.array(z.string()).required(false),
   requireWorkingDir: z.boolean().required(false),
+  cardCommands: z
+    .array(
+      z.object({
+        name: z.string(),
+        file: z.string().required(false),
+        args: z.array(z.string()).required(false),
+        cwd: z.string().required(false),
+      }),
+    )
+    .required(false),
   locale: z.union([z.const('en-US'), z.const('zh-CN')]).required(false),
   reactions: z
     .object({
@@ -734,6 +755,9 @@ export function apply(ctx: Context, config: Config, deps: ApplyDeps = {}): void 
     ...(config.repoRoots !== undefined ? { repoRoots: config.repoRoots } : {}),
     ...(config.requireWorkingDir !== undefined
       ? { requireWorkingDir: config.requireWorkingDir }
+      : {}),
+    ...(config.cardCommands !== undefined
+      ? { cardCommands: normalizeCardCommands(config.cardCommands) }
       : {}),
     ...(config.reactions !== undefined ? { reactions: config.reactions } : {}),
     identityAliasesFile,

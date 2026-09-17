@@ -7,7 +7,7 @@
  * covered end to end without any network).
  */
 
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import type { Agent } from '@deepseek-ai/dsh-agent';
@@ -284,6 +284,7 @@ function makeHarness(
     identityAliasesFile?: string;
     identityInjection?: boolean;
     contextMerge?: NonNullable<BridgeOptions['contextMerge']>;
+    cardCommands?: NonNullable<BridgeOptions['cardCommands']>;
   } = {},
 ): Harness {
   const transport = new RecordingTransport();
@@ -331,6 +332,7 @@ function makeHarness(
     ...(options.executeCommand !== undefined ? { executeCommand: options.executeCommand } : {}),
     ...(options.unknownCommand !== undefined ? { unknownCommand: options.unknownCommand } : {}),
     ...(options.repoRoots !== undefined ? { repoRoots: options.repoRoots } : {}),
+    ...(options.cardCommands !== undefined ? { cardCommands: options.cardCommands } : {}),
     ...(options.listSessions !== undefined ? { listSessions: options.listSessions } : {}),
     ...(options.permissionPresets !== undefined
       ? { permissionPresets: options.permissionPresets }
@@ -1683,6 +1685,151 @@ describe('Bridge', () => {
       expect(h.agentStore.cancels).toEqual([]);
       expect(h.transport.sentTexts).toEqual([]);
       expect(h.transport.sentCards).toHaveLength(1); // the streaming card only
+    });
+
+    it('an external card button (kind agent-prompt) runs as a user turn with the form values', async () => {
+      const h = makeHarness();
+      await h.bridge.handleMessage(message());
+      expect(h.agentStore.followups.get('feishu-session-1')).toHaveLength(1);
+      const cardsBefore = h.transport.sentCards.length;
+
+      await h.bridge.handleCardAction({
+        messageId: 'om_card_1',
+        chatId: 'oc_chat',
+        operatorOpenId: 'ou_user',
+        value: { kind: 'agent-prompt', action: 'generate', prompt: 'run image-gen now' },
+        formValue: { prompt: '一只猫', width: '512', seed: '-1' },
+      });
+
+      const followups = h.agentStore.followups.get('feishu-session-1');
+      expect(followups).toHaveLength(2);
+      const blocks = (followups?.[1]?.content ?? []) as Array<{ type: string; text?: string }>;
+      const text = blocks.map((b) => b.text ?? '').join('\n');
+      // The authored instruction and the machine-readable envelope both land.
+      expect(text).toContain('run image-gen now');
+      expect(text).toContain('[feishu-card-action]');
+      expect(text).toContain('om_card_1');
+      expect(text).toContain('"action":"generate"');
+      expect(text).toContain('一只猫');
+      expect(text).toContain('"width":"512"');
+      // QUIET turn: the external card owns the UI, so no second streaming card
+      // is posted (and no reaction is put on the card message).
+      expect(h.transport.sentCards).toHaveLength(cardsBefore);
+    });
+
+    it('a quiet external-card turn still echoes its final text (nothing is swallowed)', async () => {
+      // Without an echo, an agent that refuses / asks a question / cannot run
+      // the command would be a black box: its reply has no card to land on.
+      const h = makeHarness({ throttleMs: 0 });
+      await h.bridge.handleMessage(message());
+      await h.bridge.handleCardAction({
+        messageId: 'om_card_9',
+        chatId: 'oc_chat',
+        operatorOpenId: 'ou_user',
+        value: { kind: 'agent-prompt', action: 'generate', prompt: 'run image-gen now' },
+      });
+      await h.bridge.handleEvent('feishu-session-1', chunkEvent('这个我不做。'));
+      await h.bridge.handleEvent(
+        'feishu-session-1',
+        turnEndEvent({ kind: 'completed' }) as SessionEvent,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(h.transport.sentTexts.some((t) => t.text.includes('这个我不做。'))).toBe(true);
+    });
+
+    it('a queued external-card action stays quiet when it is re-delivered', async () => {
+      const h = makeHarness({ throttleMs: 0 });
+      await h.bridge.handleMessage(message());
+      // First click: quiet turn starts and keeps the chat working.
+      await h.bridge.handleCardAction({
+        messageId: 'om_card_q1',
+        chatId: 'oc_chat',
+        operatorOpenId: 'ou_user',
+        value: { kind: 'agent-prompt', action: 'generate', prompt: 'first' },
+      });
+      const cardsAfterFirst = h.transport.sentCards.length;
+      // Second click while the first turn runs → surface queue.
+      await h.bridge.handleCardAction({
+        messageId: 'om_card_q2',
+        chatId: 'oc_chat',
+        operatorOpenId: 'ou_user',
+        value: { kind: 'agent-prompt', action: 'generate', prompt: 'second' },
+      });
+      // The owning turn ends → the queue drains the second item.
+      await h.bridge.handleEvent(
+        'feishu-session-1',
+        turnEndEvent({ kind: 'completed' }) as SessionEvent,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      // The re-delivered item must NOT open a streaming card of its own: only
+      // the queue card from the second click is new.
+      expect(h.transport.sentCards.length).toBeLessThanOrEqual(cardsAfterFirst + 1);
+    });
+
+    it('an external card button (kind run) runs an allowlisted command with no agent turn', async () => {
+      const out = join(SCRATCH, `card-run-${Date.now()}.txt`);
+      const h = makeHarness({
+        cardCommands: [
+          {
+            name: 'skill',
+            file: process.execPath,
+            args: ['-e', 'require("node:fs").writeFileSync(process.argv[1], process.argv[2])', out],
+          },
+        ],
+      });
+      await h.bridge.handleMessage(message());
+      const followupsBefore = h.agentStore.followups.get('feishu-session-1')?.length ?? 0;
+
+      await h.bridge.handleCardAction({
+        messageId: 'om_card_run',
+        chatId: 'oc_chat',
+        operatorOpenId: 'ou_user',
+        value: { kind: 'run', name: 'skill', args: ['{form.prompt}'] } as unknown as Record<
+          string,
+          string
+        >,
+        formValue: { prompt: '一只猫' },
+      });
+
+      // No agent turn, no card: the command itself owns the UI.
+      expect(h.agentStore.followups.get('feishu-session-1')?.length ?? 0).toBe(followupsBefore);
+      for (let i = 0; i < 50 && !existsSync(out); i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      expect(readFileSync(out, 'utf8')).toBe('一只猫');
+    });
+
+    it('a run-kind button outside the allowlist reports instead of running', async () => {
+      const h = makeHarness({ cardCommands: [] });
+      await h.bridge.handleMessage(message());
+      await h.bridge.handleCardAction({
+        messageId: 'om_card_run2',
+        chatId: 'oc_chat',
+        operatorOpenId: 'ou_user',
+        value: { kind: 'run', name: 'rm', args: ['-rf', '/'] } as unknown as Record<string, string>,
+      });
+      expect(
+        h.transport.sentTexts.some((t) => t.text.includes('cardCommands') && t.text.includes('rm')),
+      ).toBe(true);
+    });
+
+    it('an external card button is not dropped by the group mention gate', async () => {
+      const h = makeHarness({ groupMentionMode: 'always' });
+      // A correctly mentioned group message first: it registers the chat's
+      // type, which the card-action turn reuses (the callback carries no
+      // chat_type of its own).
+      await h.bridge.handleMessage(groupMessage(['ou_bot']));
+      expect(h.agentStore.followups.get('feishu-session-1')).toHaveLength(1);
+
+      await h.bridge.handleCardAction({
+        messageId: 'om_card_2',
+        chatId: 'oc_chat',
+        operatorOpenId: 'ou_user',
+        value: { kind: 'agent-prompt', action: 'stop-engine', prompt: 'stop the engine' },
+      });
+
+      // A button click IS addressed to the bot — no @-mention required.
+      expect(h.agentStore.followups.get('feishu-session-1')).toHaveLength(2);
     });
 
     it('panel with no session explains that the bot may have restarted', async () => {

@@ -515,6 +515,17 @@ export class LarkTransport implements FeishuTransport {
       'card.action.trigger': (data: RawCardActionEvent) => {
         const action = normalizeCardAction(data);
         if (action !== undefined) this.actionHandler?.(action);
+        else {
+          // A callback we cannot normalize used to vanish without a trace — the
+          // user sees "the button does nothing" and the log is empty. The
+          // classic cause is a Card 2.0 button carrying the 1.0-style top-level
+          // `value`: JSON 2.0 returns `action.value` only for
+          // `behaviors:[{type:'callback'}]`, so the payload arrives with no
+          // `value` object. Log the raw event so the cause is visible.
+          this.logger?.warn(
+            `card.action.trigger ignored (no actionable payload): ${JSON.stringify(data).slice(0, 1200)}`,
+          );
+        }
         // ACK with no UI update. Returning undefined produces a code-only
         // response the Feishu client rejects as an invalid ACK (botmux
         // lesson: the client can then re-render the card to a stale state —

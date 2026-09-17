@@ -459,4 +459,12 @@ export const enMessages = {
   'error.turnFailed': '⚠️ Turn failed: {error}',
   'error.unknown': 'unknown error',
   'error.unspecified': 'The turn failed with an unspecified error.',
+
+  // ── Card-button commands (the cardCommands seam) ────────────────────────
+  'cardRun.notAllowed':
+    '🚫 A card button asked to run "{name}", which is not in the configured cardCommands allowlist.',
+  'cardRun.busy':
+    '⏳ A card command ({name}) is already running in this chat — wait for it to finish.',
+  'cardRun.invalid': '🚫 The card button payload is invalid: {detail}',
+  'cardRun.failed': '🚫 Card command "{name}" could not start: {detail}',
 } as const;

@@ -437,4 +437,10 @@ export const zhMessages: Record<MessageKey, string> = {
   'error.turnFailed': '⚠️ 回复失败：{error}',
   'error.unknown': '未知错误',
   'error.unspecified': '该次回复因未指明的错误而失败。',
+
+  // ── Card-button commands (the cardCommands seam) ────────────────────────
+  'cardRun.notAllowed': '🚫 卡片按钮请求执行「{name}」，但它不在配置的 cardCommands 允许清单里。',
+  'cardRun.busy': '⏳ 本会话已有一个卡片命令（{name}）在跑，等它结束再点。',
+  'cardRun.invalid': '🚫 卡片按钮载荷无效：{detail}',
+  'cardRun.failed': '🚫 卡片命令「{name}」启动失败：{detail}',
 };

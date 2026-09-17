@@ -144,6 +144,14 @@ export interface ChatCardState {
   /** A friendly, actionable explanation of the last turn failure, or
    *  `undefined` when the last turn didn't fail. Reset on turn start. */
   errorText: string | undefined;
+  /**
+   * This turn runs WITHOUT a card of its own (an external card owns the UI —
+   * see {@link StreamingCardController.beginTurn}). The final assistant text is
+   * then echoed as a plain message at `turn/end`, because there is no card to
+   * carry it: a refusal, a question, or a failure verdict must never be
+   * swallowed silently.
+   */
+  readonly quiet?: boolean;
 }
 
 /**
@@ -391,21 +399,40 @@ export class StreamingCardController {
    * Begin a turn's card lifecycle: two-stage ack stage 1 (👀 on the accepted
    * message), enter the working state, and open the streaming card. Best
    * effort — a failed reaction or card post never blocks the turn.
+   *
+   * `options.quiet` skips BOTH the reaction and the card while still entering
+   * the working state. It exists for turns a card the surface did NOT render
+   * asked for (an external card's button, `kind: 'agent-prompt'`): that card
+   * is its own progress UI — the skill behind it patches it with the run log —
+   * so a second streaming bubble would be pure noise. All streaming events
+   * still fold into the state (the card patches are no-ops with no open card),
+   * which keeps `turn/end` working: a FAILED quiet turn still posts the error
+   * notice, a completed one stays silent.
    * @param chatId - the chat.
    * @param messageId - the accepted message id (ack target).
    * @param title - the streaming-card title.
+   * @param options - `quiet: true` to run the turn without a card or reaction.
    */
-  async beginTurn(chatId: string, messageId: string, title: string): Promise<void> {
+  async beginTurn(
+    chatId: string,
+    messageId: string,
+    title: string,
+    options: { readonly quiet?: boolean } = {},
+  ): Promise<void> {
+    const quiet = options.quiet === true;
     this.host.logger.debug(
-      `streaming beginTurn ${chatId}: message ${messageId} '${title}' (two-stage ack stage 1)`,
+      `streaming beginTurn ${chatId}: message ${messageId} '${title}'` +
+        (quiet ? ' (quiet: external card owns the UI)' : ' (two-stage ack stage 1)'),
     );
-    const reactionId = await this.host.transport
-      .addReaction(messageId, this.reactionEmojis().received)
-      .catch((error: unknown) => {
-        this.host.logger.warn(`received reaction failed: ${String(error)}`);
-        return undefined;
-      });
-    this.pendingReactions.set(chatId, { messageId, reactionId });
+    if (!quiet) {
+      const reactionId = await this.host.transport
+        .addReaction(messageId, this.reactionEmojis().received)
+        .catch((error: unknown) => {
+          this.host.logger.warn(`received reaction failed: ${String(error)}`);
+          return undefined;
+        });
+      this.pendingReactions.set(chatId, { messageId, reactionId });
+    }
     this.cardStates.set(chatId, {
       title,
       content: '',
@@ -416,7 +443,9 @@ export class StreamingCardController {
       stopRequested: false,
       producedPaths: [],
       errorText: undefined,
+      quiet,
     });
+    if (quiet) return;
     try {
       await this.host.cards.open(chatId, title);
     } catch (error: unknown) {
@@ -870,6 +899,15 @@ export class StreamingCardController {
             `${this.host.textMentionFor(chatId)}${t('error.turnFailed', {
               error: state.errorText ?? t('error.unknown'),
             })}`,
+          );
+        } else if (state.quiet === true && status === 'done' && finalText !== '') {
+          // Quiet turn (an external card owns the UI): there is no card of ours
+          // to carry the answer, so the final text goes out as a plain message.
+          // A refusal, a clarifying question, or a "I couldn't do that" must
+          // never be invisible — the whole turn ran as a black box otherwise.
+          await this.host.transport.sendText(
+            chatId,
+            `${this.host.textMentionFor(chatId)}${finalText}`,
           );
         }
         break;
