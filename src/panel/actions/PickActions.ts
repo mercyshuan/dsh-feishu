@@ -110,10 +110,7 @@ export class AgentPresetPickAction extends PanelAction {
   protected override busyTitle(): string {
     return t('command.cmd.preset.label');
   }
-  protected override work(
-    ctx: PanelActionContext,
-    action: CardAction,
-  ): Promise<CommandResult> {
+  protected override work(ctx: PanelActionContext, action: CardAction): Promise<CommandResult> {
     // The dropdown stamps the marker only; the chosen id arrives in `option`.
     const agentPreset = action.option ?? action.value.id;
     if (agentPreset === undefined || agentPreset === '') {
@@ -190,10 +187,7 @@ export class EffortPickAction extends PanelAction {
   protected override busyTitle(): string {
     return t('panel.model.title');
   }
-  protected override work(
-    ctx: PanelActionContext,
-    action: CardAction,
-  ): Promise<CommandResult> {
+  protected override work(ctx: PanelActionContext, action: CardAction): Promise<CommandResult> {
     // The dropdown stamps the marker only; the chosen level arrives in
     // `option`.
     const effort = action.option ?? action.value.effort;

@@ -12,13 +12,13 @@
  */
 
 import {
+  type AgentPresetView,
   buildAgentPresetPickerCard,
   buildConfirmCard,
   buildInputCard,
   buildModelPickerCard,
   buildPermissionPickerCard,
   buildRepoPickerCard,
-  type AgentPresetView,
   type PermissionPresetView,
 } from '../../cards/render.js';
 import { buildSessionDetailCard, buildSessionsCard } from '../../cards/session-list.js';

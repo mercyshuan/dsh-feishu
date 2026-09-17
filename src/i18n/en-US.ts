@@ -353,8 +353,7 @@ export const enMessages = {
   'command.info.agentPresetSwitched': 'Agent preset switched to {preset}.',
   'command.info.agentPresetNextSession':
     'Agent preset {preset} applies from this chat’s next session (/new) — the current one is already fixed.',
-  'command.info.agentPresetPending':
-    'Agent preset {preset} applies from this chat’s next session.',
+  'command.info.agentPresetPending': 'Agent preset {preset} applies from this chat’s next session.',
   'command.info.agentPresetUnchanged': 'Agent preset is already {preset}.',
   'command.info.cwdSetRestart':
     'Working directory set to {path} (session restarts on your next message).',
@@ -407,8 +406,7 @@ export const enMessages = {
   'panel.action.permissionSwitchFailed': 'could not switch to preset {preset}: {detail}',
   'panel.action.agentPresetUnavailable':
     'agent presets are unavailable on this deployment — the agent-presets row is not mounted.',
-  'panel.action.agentPresetSwitchFailed':
-    'could not switch to agent preset {preset}: {detail}',
+  'panel.action.agentPresetSwitchFailed': 'could not switch to agent preset {preset}: {detail}',
   'panel.action.agentPresetPickInvalid': 'No agent preset was chosen.',
 
   // ── Permission preset display names (the service exposes raw ids) ───────

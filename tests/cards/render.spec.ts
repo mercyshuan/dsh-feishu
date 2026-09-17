@@ -133,8 +133,12 @@ describe('rowLine', () => {
 });
 
 describe('collapseThought', () => {
-  const think = (id: string, text: string, settled = false) =>
-    ({ kind: 'think' as const, id, text, settled });
+  const think = (id: string, text: string, settled = false) => ({
+    kind: 'think' as const,
+    id,
+    text,
+    settled,
+  });
   const tool = (id: string, name: string, summary = '', status: 'done' | 'running' = 'done') => ({
     kind: 'tool' as const,
     id,
@@ -166,9 +170,7 @@ describe('collapseThought', () => {
   });
 
   it('flattens newlines and runs of whitespace onto one line', () => {
-    expect(collapseThought([think('t1', 'line one\n\n  line two\t')])).toBe(
-      '☁️ line one line two',
-    );
+    expect(collapseThought([think('t1', 'line one\n\n  line two\t')])).toBe('☁️ line one line two');
   });
 
   it('skips reasoning rows that carry no text yet', () => {

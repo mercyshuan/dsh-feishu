@@ -1295,7 +1295,9 @@ export function buildAgentPresetPickerCard(presets: readonly AgentPresetView[]):
           text: {
             tag: 'plain_text',
             content:
-              preset.broken === undefined ? preset.label : `${preset.label} ${t('panel.agentPreset.brokenMark')}`,
+              preset.broken === undefined
+                ? preset.label
+                : `${preset.label} ${t('panel.agentPreset.brokenMark')}`,
           },
           value: preset.id,
         })),

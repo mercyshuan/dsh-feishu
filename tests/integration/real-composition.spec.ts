@@ -532,9 +532,7 @@ describe.skipIf(!integrationReady)('real-composition integration', () => {
       expect(
         finalCard?.elements.some(
           (el) =>
-            el.tag === 'markdown' &&
-            'content' in el &&
-            el.content === '☁️ Let me check the files.',
+            el.tag === 'markdown' && 'content' in el && el.content === '☁️ Let me check the files.',
         ),
       ).toBe(true);
 

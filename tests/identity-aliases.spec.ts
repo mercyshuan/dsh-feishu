@@ -69,7 +69,11 @@ describe('identityBlockText', () => {
   it('names the registered person (nickname + name + knowledge base) in the fact line', () => {
     const text = identityBlockText({
       ...WANG,
-      alias: { name: '王天义', nickname: '小义', knowledgeBase: 'D:\\feishu-agent\\docs\\wangtianyi' },
+      alias: {
+        name: '王天义',
+        nickname: '小义',
+        knowledgeBase: 'D:\\feishu-agent\\docs\\wangtianyi',
+      },
     });
     expect(text.split('\n')).toEqual([
       '[Feishu identity] 当前对话对象：小义（王天义）· 知识库：D:\\feishu-agent\\docs\\wangtianyi · sender_open_id=ou_wang · chat=oc_chat · 类型：私聊',

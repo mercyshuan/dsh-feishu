@@ -261,10 +261,8 @@ export function identityBlockText(input: IdentityBlockInput): string {
       `（这是本次请求的发送者身份，但尚未登记姓名；在依赖身份作答前先向对方确认，并提示把结果登记到别名表文件：${input.aliasesFile}。）`,
     ].join('\n');
   }
-  const who =
-    alias.nickname === undefined ? alias.name : `${alias.nickname}（${alias.name}）`;
-  const knowledgeBase =
-    alias.knowledgeBase === undefined ? '' : `· 知识库：${alias.knowledgeBase}`;
+  const who = alias.nickname === undefined ? alias.name : `${alias.nickname}（${alias.name}）`;
+  const knowledgeBase = alias.knowledgeBase === undefined ? '' : `· 知识库：${alias.knowledgeBase}`;
   return [
     `${IDENTITY_PREFIX} 当前对话对象：${who}${knowledgeBase} · ${location}`,
     '（这是本次请求的发送者身份；按其身份作答，关于此人的个人信息只读写其知识库。）',
