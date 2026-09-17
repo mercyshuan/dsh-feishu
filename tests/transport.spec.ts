@@ -698,6 +698,103 @@ describe('LarkTransport.resolveBotOpenId', () => {
   });
 });
 
+/**
+ * The bot open id arms the group mention gate, so a lookup that fails once
+ * (an auto-start service races the network stack, and `open.feishu.cn` is
+ * briefly unresolvable) must not leave the gate disabled forever.
+ */
+describe('LarkTransport bot open id retry', () => {
+  /** The private surface these tests drive directly. */
+  interface Internals {
+    client: { request: unknown };
+    ensureBotOpenId(): void;
+  }
+
+  function makeTransport(warns: string[]): LarkTransport {
+    return new LarkTransport({
+      credentials: { appId: 'cli_test', appSecret: 'secret' },
+      logger: {
+        info: () => {},
+        warn: (message: string) => warns.push(message),
+        error: () => {},
+        debug: () => {},
+      },
+    });
+  }
+
+  it('retries a failed lookup and arms the gate once the network returns', async () => {
+    vi.useFakeTimers();
+    try {
+      const warns: string[] = [];
+      const transport = makeTransport(warns);
+      const request = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('getaddrinfo ENOTFOUND open.feishu.cn'))
+        .mockResolvedValue({ code: 0, msg: 'ok', bot: { open_id: 'ou_bot' } });
+      (transport as unknown as Internals).client = { request } as never;
+
+      (transport as unknown as Internals).ensureBotOpenId();
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(transport.getBotOpenId()).toBeUndefined();
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(warns.join(' ')).toContain('bot open id resolution failed (attempt 1)');
+
+      // The first backoff step (2s) runs the retry that succeeds.
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(transport.getBotOpenId()).toBe('ou_bot');
+
+      // A resolved id cancels the schedule: no further lookups are issued.
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(request).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('coalesces concurrent calls into one in-flight lookup', async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = makeTransport([]);
+      const request = vi.fn().mockResolvedValue({ code: 0, msg: 'ok', bot: { open_id: 'ou_bot' } });
+      (transport as unknown as Internals).client = { request } as never;
+
+      const internals = transport as unknown as Internals;
+      internals.ensureBotOpenId();
+      internals.ensureBotOpenId();
+      internals.ensureBotOpenId();
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(transport.getBotOpenId()).toBe('ou_bot');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels a pending retry when the transport stops', async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = makeTransport([]);
+      const request = vi.fn().mockRejectedValue(new Error('getaddrinfo ENOTFOUND open.feishu.cn'));
+      (transport as unknown as Internals).client = { request } as never;
+
+      (transport as unknown as Internals).ensureBotOpenId();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(request).toHaveBeenCalledTimes(1);
+
+      await transport.stop();
+      await vi.advanceTimersByTimeAsync(300_000);
+
+      expect(request).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 /** Concatenate byte chunks into one Uint8Array (test helper). */
 function concat(chunks: readonly Uint8Array[]): Uint8Array {
   let length = 0;

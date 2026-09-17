@@ -375,6 +375,16 @@ export function normalizeCardAction(data: RawCardActionEvent): CardAction | unde
  * The Feishu transport: long-connection receive + API send/update.
  */
 export class LarkTransport implements FeishuTransport {
+  /**
+   * Backoff schedule for the bot open id lookup (ms). The lookup can fail for
+   * reasons that clear on their own — an auto-start service runs before the
+   * network stack is up, so `open.feishu.cn` is briefly unresolvable
+   * (`getaddrinfo ENOTFOUND`). The schedule is bounded so a lookup that is
+   * broken for another reason stops issuing requests instead of retrying
+   * forever.
+   */
+  private static readonly BOT_OPEN_ID_RETRY_DELAYS_MS = [2_000, 5_000, 15_000, 30_000, 60_000];
+
   private readonly client: Client;
   private readonly ws: WSClient;
   private readonly dispatcher = new EventDispatcher({});
@@ -382,6 +392,10 @@ export class LarkTransport implements FeishuTransport {
   private actionHandler: ((action: CardAction) => void) | undefined;
   private readonly logger: TransportLogger | undefined;
   private botOpenIdValue: string | undefined;
+  /** Bot-open-id bookkeeping: attempts spent, in-flight call, pending retry. */
+  private botOpenIdAttempts = 0;
+  private botOpenIdPending: Promise<void> | undefined;
+  private botOpenIdRetryTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly statsCache = new Map<string, { stats: ChatStats; at: number }>();
   /** Live long-connection state, maintained by the WSClient callbacks. */
   private connectionStateValue: 'ready' | 'reconnecting' | 'error' = 'reconnecting';
@@ -404,6 +418,10 @@ export class LarkTransport implements FeishuTransport {
         this.connectionStateValue = 'ready';
         this.logger?.info('feishu long connection ready');
         this.logger?.debug('transport ws state -> ready');
+        // A live long connection proves the network is up, which is exactly
+        // what the bot open id lookup needs: retry it here so a start-up that
+        // lost the race against DNS heals as soon as the link is usable.
+        this.ensureBotOpenId();
       },
       onError: (error) => {
         this.connectionStateValue = 'error';
@@ -449,10 +467,10 @@ export class LarkTransport implements FeishuTransport {
     await this.ws.start({ eventDispatcher: this.dispatcher });
     // Resolve the bot's own open id once the connection is up; the group
     // mention gate needs it to tell "the bot was mentioned" apart from
-    // "someone else was mentioned".
-    void this.resolveBotOpenId().catch((error: unknown) => {
-      this.logger?.warn(`bot open id resolution failed: ${String(error)}`);
-    });
+    // "someone else was mentioned". Retried (and re-attempted on every
+    // long-connection ready) because one failed lookup must not disable that
+    // gate for the lifetime of the process.
+    this.ensureBotOpenId();
   }
 
   /**
@@ -533,6 +551,64 @@ export class LarkTransport implements FeishuTransport {
     return { chatId };
   }
 
+  /**
+   * Resolve the bot's own open id, retrying with backoff until it lands.
+   *
+   * The gate in `bridge.ts` compares a group message's `mentions` against
+   * this id, so an id that never arrives silently turns every @-mention into
+   * "bot not mentioned": the bridge looks alive, holds a healthy long
+   * connection, and answers nobody. A single attempt is therefore not enough
+   * — an auto-start service can lose the race against the network stack.
+   * Concurrent callers share one in-flight lookup, and a success cancels the
+   * schedule.
+   */
+  private ensureBotOpenId(): void {
+    if (this.botOpenIdValue !== undefined || this.botOpenIdPending !== undefined) return;
+    this.botOpenIdPending = this.resolveBotOpenId()
+      .then(() => {
+        this.botOpenIdAttempts = 0;
+        this.clearBotOpenIdRetry();
+      })
+      .catch((error: unknown) => {
+        this.botOpenIdAttempts += 1;
+        this.logger?.warn(
+          `bot open id resolution failed (attempt ${this.botOpenIdAttempts}): ${String(error)}`,
+        );
+        this.scheduleBotOpenIdRetry();
+      })
+      .finally(() => {
+        this.botOpenIdPending = undefined;
+      });
+  }
+
+  /** Queue the next bot-open-id attempt, or give up once the schedule is spent. */
+  private scheduleBotOpenIdRetry(): void {
+    if (this.botOpenIdRetryTimer !== undefined) return;
+    const delays = LarkTransport.BOT_OPEN_ID_RETRY_DELAYS_MS;
+    if (this.botOpenIdAttempts > delays.length) {
+      this.logger?.warn(
+        'bot open id still unresolved after every retry — the group mention gate stays disabled until the bridge restarts',
+      );
+      return;
+    }
+    const delay = delays[Math.min(this.botOpenIdAttempts, delays.length) - 1] ?? 60_000;
+    const timer = setTimeout(() => {
+      this.botOpenIdRetryTimer = undefined;
+      this.ensureBotOpenId();
+    }, delay);
+    // Never keep the process alive on a retry: a bare `dsh --profile feishu`
+    // run must still exit once its surface goes away.
+    if (typeof timer.unref === 'function') timer.unref();
+    this.botOpenIdRetryTimer = timer;
+  }
+
+  /** Cancel a pending bot-open-id retry (lookup succeeded, or transport stopped). */
+  private clearBotOpenIdRetry(): void {
+    if (this.botOpenIdRetryTimer === undefined) return;
+    clearTimeout(this.botOpenIdRetryTimer);
+    this.botOpenIdRetryTimer = undefined;
+  }
+
   /** Fetch and cache the bot's own open id (`bot/v3/info`). */
   private async resolveBotOpenId(): Promise<void> {
     const response = await this.client.request<unknown>({
@@ -550,7 +626,10 @@ export class LarkTransport implements FeishuTransport {
     const openId = parseBotOpenId(response);
     if (openId !== undefined) {
       this.botOpenIdValue = openId;
-      this.logger?.debug(`bot open id resolved: ${openId}`);
+      // Info (not debug): whether the mention gate is armed is the difference
+      // between a working bridge and one that silently ignores every group
+      // @-mention, so it belongs in the default log and in health checks.
+      this.logger?.info(`bot open id resolved: ${openId}`);
     } else {
       // Fail loud: the group mention gate needs the bot's own open id to tell
       // "the bot was mentioned" apart from "someone else was mentioned". A
@@ -592,6 +671,7 @@ export class LarkTransport implements FeishuTransport {
 
   /** Disconnect the long connection. */
   async stop(): Promise<void> {
+    this.clearBotOpenIdRetry();
     this.ws.close();
   }
 
