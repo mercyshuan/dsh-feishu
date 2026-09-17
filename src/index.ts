@@ -37,6 +37,7 @@ import {
   type AgentPresetsService,
   type AgentStore,
   type ApprovalRequestLike,
+  type AssistantStreamChunk,
   type AskQuestionsRequestLike,
   Bridge,
   type BridgeLogger,
@@ -524,6 +525,28 @@ function presetSetup(ctx: Context, agentPreset: string): (agentCtx: Context) => 
 }
 
 /** Injectable dependencies so `apply` is unit-testable without a network. */
+/**
+ * The `agent/assistant-stream` dispatch payload (`dsh-agent-loop`): the owning
+ * agent plus one transient frame. Only the members this surface reads are
+ * structural here, so the subscription does not depend on the host's exact
+ * exported frame types.
+ */
+interface AssistantStreamFramePayload {
+  readonly agent: { readonly session: { readonly id: unknown } };
+  readonly frame: { readonly type: string; readonly chunk?: AssistantStreamChunk };
+}
+
+/**
+ * `ctx.on`, widened for host events the compiled `Events` map does not carry.
+ * `agent/assistant-stream` ships with dsh 0.1.5 while this package still
+ * compiles against the 0.1.2 type tree, so subscribing through the narrow
+ * `keyof Events` overload would not type-check.
+ */
+type HostEventOn = (
+  name: string,
+  listener: (payload: AssistantStreamFramePayload) => void,
+) => () => void;
+
 export interface ApplyDeps {
   /** Transport factory; defaults to the lark-oapi implementation. */
   createTransport?: (credentials: Credentials, logger: BridgeLogger) => FeishuTransport;
@@ -665,6 +688,19 @@ export function apply(ctx: Context, config: Config, deps: ApplyDeps = {}): void 
       ctx.on('session/event', (session, event) => {
         listener(session.id, event);
       }),
+    // dsh 0.1.5 publishes the incremental text/reasoning deltas as transient
+    // `agent/assistant-stream` frames instead of durable `assistant/chunk`
+    // session events; without this subscription the streaming card loses its
+    // think rows and renders only the tool trail.
+    onAssistantStream: (listener) =>
+      (ctx.on as unknown as HostEventOn)(
+        'agent/assistant-stream',
+        (payload: AssistantStreamFramePayload) => {
+          const { frame } = payload;
+          if (frame.type !== 'chunk' || frame.chunk === undefined) return;
+          listener(String(payload.agent.session.id), frame.chunk);
+        },
+      ),
     cards,
     defaultCwd: config.defaultCwd ?? process.cwd(),
     dataDir,

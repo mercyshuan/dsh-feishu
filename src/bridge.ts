@@ -389,6 +389,17 @@ export interface AskQuestionsAnswerLike {
 }
 
 /** Options for {@link Bridge}. */
+/**
+ * One transient assistant-stream chunk: the `StreamChunk` payload dsh 0.1.5
+ * publishes through `agent/assistant-stream`. Only `type` and the optional
+ * `text` are structural here — the streaming controller narrows the full
+ * shape itself when it folds the chunk into its rows.
+ */
+export interface AssistantStreamChunk {
+  readonly type: string;
+  readonly text?: string;
+}
+
 export interface BridgeOptions {
   readonly transport: FeishuTransport;
   readonly sessionMap: SessionMap;
@@ -399,6 +410,18 @@ export interface BridgeOptions {
    */
   readonly onSessionEvent: (
     listener: (sessionId: string, event: SessionEvent) => void,
+  ) => () => void;
+  /**
+   * Subscribe to the process-local assistant stream (`dsh-agent-loop`'s
+   * `agent/assistant-stream` dispatch). Since dsh 0.1.5 the incremental
+   * text/reasoning deltas are transient frames rather than durable
+   * `assistant/chunk` session events, so this is the channel that keeps the
+   * streaming card live on 0.1.5; a 0.1.2 core never dispatches it and is
+   * served by {@link BridgeOptions.onSessionEvent} alone. Optional so test
+   * doubles and older hosts keep working. Returns a disposer.
+   */
+  readonly onAssistantStream?: (
+    listener: (sessionId: string, chunk: AssistantStreamChunk) => void,
   ) => () => void;
   readonly cards: StreamingCardManager;
   readonly defaultCwd: string;
@@ -740,6 +763,12 @@ export class Bridge {
     return sessionId === undefined ? undefined : this.options.agentStore.get(sessionId);
   }
   private readonly disposeEvents: () => void;
+  /** Frames from `agent/assistant-stream` are transient. A core that ALSO
+   *  appends the durable `assistant/chunk` event for a session must not fold
+   *  the same text twice, so once the durable channel has been seen for a
+   *  session, its frames are ignored. */
+  private readonly durableChunkSessions = new Set<string>();
+  private readonly disposeAssistantStream: (() => void) | undefined;
   private readonly commands = new CommandRegistry();
 
   constructor(private readonly options: BridgeOptions) {
@@ -761,6 +790,9 @@ export class Bridge {
       void this.handleEvent(sessionId, event).catch((error: unknown) => {
         options.logger.error(`session event handling failed: ${String(error)}`);
       });
+    });
+    this.disposeAssistantStream = options.onAssistantStream?.((sessionId, chunk) => {
+      this.handleAssistantStreamChunk(sessionId, chunk);
     });
     registerSurfaceCommands(this.commands, this.commandHost());
   }
@@ -899,9 +931,10 @@ export class Bridge {
     };
   }
 
-  /** Detach the session-event subscription. */
+  /** Detach the session-event and assistant-stream subscriptions. */
   dispose(): void {
     this.disposeEvents();
+    this.disposeAssistantStream?.();
     this.interactions.dispose();
   }
 
@@ -2662,6 +2695,14 @@ export class Bridge {
    * @param event - the session event.
    */
   async handleEvent(sessionId: string, event: SessionEvent): Promise<void> {
+    // A DURABLE `assistant/chunk` (it carries a committed `seq`) proves this
+    // core still appends the deltas, so the transient frame channel must stand
+    // down for this session — otherwise the same text folds twice. The
+    // synthesised frame event in {@link Bridge.handleAssistantStreamChunk} has
+    // no `seq`, which is exactly how the two are told apart here.
+    if (event.type === 'assistant/chunk' && (event as { readonly seq?: number }).seq !== undefined) {
+      this.durableChunkSessions.add(sessionId);
+    }
     this.options.logger.debug(`session event ${event.type} from ${sessionId}`);
     await this.streaming.handleEvent(sessionId, event);
     // message-queue: reconcile the per-item queue cards after the event — on
@@ -2673,6 +2714,31 @@ export class Bridge {
     if (chatId !== undefined && this.queueCards.has(chatId)) {
       await this.syncQueueAfterEvent(chatId, event);
     }
+  }
+
+  /**
+   * Fold one transient assistant-stream chunk into the owning chat's card.
+   *
+   * dsh 0.1.5 stopped appending the durable `assistant/chunk` session event and
+   * publishes the same `StreamChunk` as a process-local
+   * `agent/assistant-stream` frame instead (`dsh-agent-loop`:
+   * `dispatch.emit('agent/assistant-stream', { frame })`, whose `frame.chunk`
+   * is the delta). Without this channel the card never sees a
+   * `reasoning-delta`, so no think row is ever created and the folded card
+   * degrades to `collapseThought`'s tool-row fallback — the user-facing
+   * symptom being "thinking is gone, only the short tool lines remain". The
+   * frame re-enters the very branch the durable event used, so there is one
+   * card state machine and two transports.
+   * @param sessionId - the session that produced the frame.
+   * @param chunk - the transient `StreamChunk` payload.
+   */
+  private handleAssistantStreamChunk(sessionId: string, chunk: AssistantStreamChunk): void {
+    // A core that still appends the durable event already fed this text.
+    if (this.durableChunkSessions.has(sessionId)) return;
+    const event = { type: 'assistant/chunk', data: { chunk } } as unknown as SessionEvent;
+    void this.handleEvent(sessionId, event).catch((error: unknown) => {
+      this.options.logger.error(`assistant stream chunk handling failed: ${String(error)}`);
+    });
   }
 
   /**

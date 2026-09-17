@@ -16,6 +16,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   type AgentDefaultModelService,
+  type AssistantStreamChunk,
   Bridge,
   type BridgeOptions,
   type LlmService,
@@ -275,12 +276,23 @@ function makeHarness(
       if (index >= 0) listeners.splice(index, 1);
     };
   };
+  const streamListeners: Array<(sessionId: string, chunk: AssistantStreamChunk) => void> = [];
+  const onAssistantStream = (
+    listener: (sessionId: string, chunk: AssistantStreamChunk) => void,
+  ): (() => void) => {
+    streamListeners.push(listener);
+    return () => {
+      const index = streamListeners.indexOf(listener);
+      if (index >= 0) streamListeners.splice(index, 1);
+    };
+  };
   const cards = new StreamingCardManager(transport, { throttleMs: options.throttleMs ?? 10_000 });
   const bridge = new Bridge({
     transport,
     sessionMap,
     agentStore,
     onSessionEvent,
+    onAssistantStream,
     cards,
     defaultCwd: '/work',
     dataDir: '/work',
@@ -326,6 +338,10 @@ function makeHarness(
   const emit = (sessionId: string, event: SessionEvent): void => {
     for (const listener of [...listeners]) listener(sessionId, event);
   };
+  /** Publish one transient `agent/assistant-stream` frame (dsh 0.1.5). */
+  const emitStream = (sessionId: string, chunk: AssistantStreamChunk): void => {
+    for (const listener of [...streamListeners]) listener(sessionId, chunk);
+  };
   return {
     transport,
     agentStore,
@@ -333,6 +349,7 @@ function makeHarness(
     bridge,
     disposeEvents: () => () => {},
     emit,
+    emitStream,
   };
 }
 
@@ -994,6 +1011,37 @@ describe('Bridge', () => {
     // A completed turn sends no second bubble: the card holds the full
     // answer and finalizes green in place (the initial card send notified).
     expect(h.transport.sentTexts).toEqual([]);
+  });
+
+  it('folds transient assistant-stream frames into the card (dsh 0.1.5)', async () => {
+    const h = makeHarness({ throttleMs: 0 });
+    await h.bridge.handleMessage(message());
+    // dsh 0.1.5 publishes the incremental deltas as transient
+    // `agent/assistant-stream` frames instead of durable `assistant/chunk`
+    // session events. Without this channel no think row is ever created, so the
+    // folded card degrades to `collapseThought`'s tool-row fallback — the
+    // user-facing symptom being "thinking is gone, only the short tool lines".
+    h.emitStream('feishu-session-1', { type: 'reasoning-delta', text: 'weighing the options' });
+    h.emitStream('feishu-session-1', { type: 'text-delta', text: 'the answer' });
+    await vi.waitFor(() => {
+      expect(JSON.stringify(h.transport.updatedCards.at(-1))).toContain('the answer');
+    });
+    // The folded card shows the CURRENT thinking, not the tool trail.
+    expect(JSON.stringify(h.transport.updatedCards.at(-1))).toContain('weighing the options');
+  });
+
+  it('ignores transient frames once the durable chunk channel has been seen', async () => {
+    const h = makeHarness({ throttleMs: 0 });
+    await h.bridge.handleMessage(message());
+    await h.bridge.handleEvent('feishu-session-1', chunkEvent('durable'));
+    h.emitStream('feishu-session-1', { type: 'text-delta', text: 'durable' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // Exactly once: a core that also appends the durable event must not have
+    // the same text folded twice through the frame channel.
+    expect(h.transport.updatedCards.at(-1)?.elements).toContainEqual({
+      tag: 'markdown',
+      content: 'durable',
+    });
   });
 
   it('renders tool calls as rows and marks them done on result', async () => {
