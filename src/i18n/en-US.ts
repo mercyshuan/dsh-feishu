@@ -508,4 +508,6 @@ export const enMessages = {
   'command.stop.cancelled': '🛑 Stopped {count} live session(s) ({running} mid-turn).',
   'command.stop.noScript':
     '⚠️ No `stop` entry in slashCommands — only the in-process turns were cancelled.',
+  'command.stop.noScriptIdle':
+    '⚠️ No `stop` entry in slashCommands — no cleanup script ran (there was no turn to cancel either).',
 } as const;

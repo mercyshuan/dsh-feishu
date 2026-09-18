@@ -483,4 +483,6 @@ export const zhMessages: Record<MessageKey, string> = {
   'command.stop.cancelled': '🛑 已停止 {count} 个活跃会话（其中 {running} 个正在跑回合）。',
   'command.stop.noScript':
     '⚠️ slashCommands 里没有名为 `stop` 的条目 —— 只取消了进程内回合，未执行清理脚本。',
+  'command.stop.noScriptIdle':
+    '⚠️ slashCommands 里没有名为 `stop` 的条目 —— 也没有需要取消的回合，未执行清理脚本。',
 };

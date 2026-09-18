@@ -790,6 +790,16 @@ export function apply(ctx: Context, config: Config, deps: ApplyDeps = {}): void 
     ...(config.contextMerge !== undefined ? { contextMerge: config.contextMerge } : {}),
     executeCommand: (agent, line) => executeDshCommand(ctx, agent, line),
     listSessions: () => listSessions(ctx),
+    // `/stop`'s fast path: the in-memory session store (`ctx.sessions`), NOT the
+    // corpus listing. `listSessions` folds a title per session by replaying its
+    // log — 276 stored sessions / ~129MB took ~15s, which made the panic button
+    // look dead. Both seams describe the SAME live set (`listSessions` marks
+    // `live: true` exactly for what this store holds), so `/stop` loses nothing.
+    listLiveSessionIds: () =>
+      ctx
+        .get('sessions')
+        ?.list()
+        .map((session) => String(session.id)),
     readSession: (sessionId) => {
       const sessionQuery = ctx.get('sessionQuery') as SessionQueryLike | undefined;
       if (sessionQuery === undefined) {

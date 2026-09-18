@@ -273,6 +273,7 @@ function makeHarness(
     unknownCommand?: 'error' | 'passthrough';
     repoRoots?: readonly string[];
     listSessions?: () => Promise<readonly SessionListRow[] | undefined>;
+    listLiveSessionIds?: NonNullable<BridgeOptions['listLiveSessionIds']>;
     permissionPresets?: PermissionPresetService;
     agentPresets?: AgentPresetsService;
     planMode?: PlanModeService;
@@ -341,6 +342,9 @@ function makeHarness(
     ...(options.cardCommands !== undefined ? { cardCommands: options.cardCommands } : {}),
     ...(options.slashCommands !== undefined ? { slashCommands: options.slashCommands } : {}),
     ...(options.listSessions !== undefined ? { listSessions: options.listSessions } : {}),
+    ...(options.listLiveSessionIds !== undefined
+      ? { listLiveSessionIds: options.listLiveSessionIds }
+      : {}),
     ...(options.permissionPresets !== undefined
       ? { permissionPresets: options.permissionPresets }
       : {}),
@@ -3306,6 +3310,57 @@ describe('/stop (the global panic button)', () => {
     }
     expect(readFileSync(out, 'utf8')).toBe('--all');
     expect(h.transport.sentTexts.at(-1)?.text ?? '').toContain('/stop');
+  });
+
+  it('cancels from the in-memory live set WITHOUT touching the corpus listing', async () => {
+    // The panic button must never pay for `listSessions`: it folds a title per
+    // session by replaying every stored log (~15s on a real corpus), which is
+    // what made `/stop` look dead. The in-memory seam also covers a live
+    // session with NO chat binding.
+    let listings = 0;
+    const h = makeHarness({
+      listLiveSessionIds: () => ['feishu-unbound'],
+      listSessions: async () => {
+        listings += 1;
+        return sessionRows();
+      },
+    });
+    await h.agentStore.create('feishu-unbound', '/work');
+    await h.bridge.handleMessage(message({ messageId: 'om_msg2', text: '/stop' }));
+    expect(h.agentStore.cancels).toEqual(['feishu-unbound']);
+    expect(listings).toBe(0);
+  });
+
+  it('cancels the chat bindings before the fallback listing resolves', async () => {
+    // A host WITHOUT the in-memory seam still stops immediately: the bindings
+    // are cancelled synchronously, and the corpus listing (here: still pending)
+    // can only ever ADD unbound sessions.
+    let release: (() => void) | undefined;
+    const h = makeHarness({
+      listSessions: () =>
+        new Promise((resolve) => {
+          release = () => resolve(sessionRows());
+        }),
+    });
+    await h.bridge.handleMessage(message()); // oc_chat → session-1, mid-turn
+    const stop = h.bridge.handleMessage(message({ messageId: 'om_msg2', text: '/stop' }));
+    for (let i = 0; i < 100 && h.agentStore.cancels.length === 0; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(h.agentStore.cancels).toEqual(['feishu-session-1']);
+    release?.();
+    await stop;
+    expect(h.transport.sentTexts.at(-1)?.text ?? '').toContain('1');
+  });
+
+  it('does not claim turns were cancelled when there were none', async () => {
+    const h = makeHarness({ listLiveSessionIds: () => [] });
+    await h.bridge.handleMessage(message({ messageId: 'om_msg2', text: '/stop' }));
+    const reply = h.transport.sentTexts.at(-1)?.text ?? '';
+    expect(reply).toContain('No live session to stop.');
+    // The cleanup half is missing, but the reply must not say in-process turns
+    // were cancelled when nothing was running.
+    expect(reply).toContain('no cleanup script ran');
   });
 });
 
