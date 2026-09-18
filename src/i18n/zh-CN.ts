@@ -449,4 +449,19 @@ export const zhMessages: Record<MessageKey, string> = {
   'cardRun.failed': '🚫 卡片命令「{name}」启动失败：{detail}',
   'command.error.cardCommandUnavailable':
     '🚫 本部署没有启用卡片命令通道（缺少 cardCommands runner）。',
+
+  // ── Typed slash lines bound to local commands (the slashCommands seam) ───
+  'slashRun.started': '▶️ `/{name}` 已启动，pid {pid}。日志：{log}',
+  'slashRun.notAllowed': '🚫 `/{name}` 不在配置的 slashCommands 允许清单里。',
+  'slashRun.busy': '⏳ `/{name}` 已在运行（{detail}），等它结束再发。',
+  'slashRun.invalid': '🚫 这条斜杠命令无效：{detail}',
+  'slashRun.failed': '🚫 `/{name}` 启动失败：{detail}',
+
+  // ── /stop: the global panic button ──────────────────────────────────────
+  'command.cmd.stop.label': '🛑 全部停止',
+  'command.help.stop': '停掉所有会话正在跑的回合，然后执行配置里名为 `stop` 的清理脚本',
+  'command.stop.noSessions': '没有正在运行的会话来停止。',
+  'command.stop.cancelled': '🛑 已停止 {count} 个活跃会话（其中 {running} 个正在跑回合）。',
+  'command.stop.noScript':
+    '⚠️ slashCommands 里没有名为 `stop` 的条目 —— 只取消了进程内回合，未执行清理脚本。',
 };

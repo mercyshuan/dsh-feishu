@@ -51,7 +51,12 @@ import {
 import type { SessionDetailView, SessionRowView } from './cards/session-list.js';
 import type { StreamingCardManager } from './cards/streaming.js';
 import { registerSurfaceCommands, type SurfaceCommandHost } from './commands/surface.js';
-import { CommandRegistry, type CommandResult, parseSlash } from './commands.js';
+import {
+  type CommandInvocation,
+  CommandRegistry,
+  type CommandResult,
+  parseSlash,
+} from './commands.js';
 import {
   type ContextMergeLimits,
   collectContextRun,
@@ -82,6 +87,7 @@ import { buildPanelViewRegistry } from './panel/views/registry.js';
 import { type ProjectInfo, scanMultipleProjects } from './projects.js';
 import { buildSessionExport, type SessionExportEvent } from './session-export.js';
 import type { SessionMap } from './session-map.js';
+import { parseSlashArgs, slashRunResult } from './slash-commands.js';
 
 export type { PanelInputCommand, PanelView } from './panel/types.js';
 
@@ -479,6 +485,16 @@ export interface BridgeOptions {
    */
   readonly cardCommands?: readonly CardCommandSpec[];
   /**
+   * Allowlisted local commands a TYPED slash line may run directly: the line's
+   * name selects an entry and only the configured `file` + fixed `args` + `cwd`
+   * decide what runs — no agent turn, no model in the loop. Empty/absent
+   * disables the seam entirely, and a name that is not listed falls through to
+   * the dsh passthrough as before. An entry named `stop` is the cleanup script
+   * `/stop` runs after cancelling every live session. See
+   * {@link CardCommandRunner}.
+   */
+  readonly slashCommands?: readonly CardCommandSpec[];
+  /**
    * DSH slash-command passthrough: execute `line` against the chat's live
    * agent through the dsh command registry. Absent, registry commands are
    * not available (every unknown slash line falls to the unknown policy).
@@ -831,6 +847,9 @@ export class Bridge {
   private readonly commands = new CommandRegistry();
   /** The card-button command seam (empty allowlist ⇒ nothing can run). */
   private readonly cardRunner: CardCommandRunner;
+  /** The typed-slash direct-run seam (empty allowlist ⇒ every unknown slash
+   *  line keeps its old passthrough/unknown behavior). */
+  private readonly slashRunner: CardCommandRunner;
 
   constructor(private readonly options: BridgeOptions) {
     this.streaming = new StreamingCardController(this.streamingHost());
@@ -840,6 +859,10 @@ export class Bridge {
     this.cardRunner = new CardCommandRunner(options.cardCommands ?? [], {
       logger: options.logger,
       logDir: join(options.dataDir, 'card-runs'),
+    });
+    this.slashRunner = new CardCommandRunner(options.slashCommands ?? [], {
+      logger: options.logger,
+      logDir: join(options.dataDir, 'slash-runs'),
     });
     options.transport.onMessage((message) => {
       void this.handleMessage(message).catch((error: unknown) => {
@@ -1100,11 +1123,24 @@ export class Bridge {
         chatId: message.chatId,
         senderOpenId: message.senderOpenId,
         rawInput: slash.rawInput,
+        messageId: message.messageId,
       });
       this.options.logger.debug(
         `command /${slash.name} (chat ${message.chatId}) -> ${result.kind}`,
       );
       await this.replyCommandResult(message.chatId, result);
+      return;
+    }
+    // A typed slash line may be bound to a LOCAL command (slashCommands): it
+    // runs directly — no agent turn, no model in the loop — and it is
+    // deliberately NOT subject to the working-state gate, because stopping (or
+    // otherwise touching) work while a turn runs is exactly what such a line is
+    // for. A name that is not allowlisted keeps the old passthrough/unknown
+    // behavior below.
+    const slashResult = this.runSlashCommand(message, slash);
+    if (slashResult !== undefined) {
+      this.options.logger.debug(`command /${slash.name} -> slash runner (chat ${message.chatId})`);
+      await this.replyCommandResult(message.chatId, slashResult);
       return;
     }
     const line = `/${slash.name}${slash.rawInput}`;
@@ -1133,6 +1169,123 @@ export class Bridge {
   private async replyCommandResult(chatId: string, result: CommandResult): Promise<void> {
     const text = result.kind === 'error' ? `⚠️ ${result.text}` : result.text;
     if (text !== '') await this.options.transport.sendText(chatId, text);
+  }
+
+  /**
+   * Run an allowlisted typed-slash command directly (no agent turn).
+   *
+   * The line's own trailing text becomes the script's argv (whitespace-split,
+   * never shell-parsed) and the placeholder context is the inbound message, so
+   * `{chat}` / `{operator}` / `{card}` resolve to the request that triggered it.
+   * @param message - the inbound message carrying the slash line.
+   * @param slash - the parsed command name and its trailing text.
+   * @returns the reply, or `undefined` when the name is not allowlisted (the
+   *   caller then keeps the passthrough/unknown policy).
+   */
+  private runSlashCommand(
+    message: FeishuMessage,
+    slash: { name: string; rawInput: string },
+  ): CommandResult | undefined {
+    if (!this.slashRunner.has(slash.name)) return undefined;
+    const outcome = this.slashRunner.run(
+      { name: slash.name, args: parseSlashArgs(slash.rawInput) },
+      {
+        chatId: message.chatId,
+        messageId: message.messageId,
+        operatorOpenId: message.senderOpenId,
+        formValue: {},
+      },
+    );
+    return slashRunResult(slash.name, outcome);
+  }
+
+  /**
+   * The `/stop` action: cancel EVERY live session's current turn, then run the
+   * allowlisted `stop` cleanup script (when configured) so a process tree the
+   * graceful cancel missed is hard-killed.
+   *
+   * Session cancellation must happen HERE — sessions are in-process objects and
+   * an external script cannot reach them; the script only cleans up after them.
+   * The returned text says which half ran and which half did not, so an
+   * unconfigured cleanup script is visible instead of silently skipped.
+   * @param invocation - the `/stop` invocation (its extra args go to the script).
+   * @returns the summary reply for the chat.
+   */
+  async stopEverything(invocation: CommandInvocation): Promise<CommandResult> {
+    const { stopped, running } = await this.cancelAllSessions();
+    this.options.logger.info(
+      `stop: every-session stop from chat ${invocation.chatId} — ${stopped} live session(s), ${running} mid-turn`,
+    );
+    const lines = [
+      stopped === 0
+        ? t('command.stop.noSessions')
+        : t('command.stop.cancelled', { count: stopped, running }),
+    ];
+    if (this.slashRunner.has('stop')) {
+      const outcome = this.slashRunner.run(
+        { name: 'stop', args: parseSlashArgs(invocation.rawInput) },
+        {
+          chatId: invocation.chatId,
+          messageId: invocation.messageId ?? '',
+          operatorOpenId: invocation.senderOpenId,
+          formValue: {},
+        },
+      );
+      lines.push(slashRunResult('stop', outcome).text);
+    } else {
+      lines.push(t('command.stop.noScript'));
+    }
+    return { kind: 'success', text: lines.join('\n') };
+  }
+
+  /**
+   * Every session that currently has a live agent: the chat bindings plus the
+   * host's live-session list (a session can be live without a chat binding —
+   * it was resumed from the desktop surface, or its chat was rebound).
+   * @returns the deduplicated session ids.
+   */
+  private async liveSessionIds(): Promise<string[]> {
+    const ids = new Set<string>();
+    for (const chat of this.options.sessionMap.chats()) {
+      const sessionId = this.options.sessionMap.get(chat);
+      if (sessionId !== undefined) ids.add(sessionId);
+    }
+    if (this.options.listSessions !== undefined) {
+      try {
+        for (const row of (await this.options.listSessions()) ?? []) {
+          if (row.live) ids.add(row.sessionId);
+        }
+      } catch (error: unknown) {
+        // Degrade to the bound chats: the stop must still happen.
+        this.options.logger.warn(`stop: live session listing failed: ${String(error)}`);
+      }
+    }
+    return [...ids];
+  }
+
+  /**
+   * Cancel the current turn of every live session (the `/stop` core). Cancel is
+   * a no-op on an idle agent, so the count reports targets, not turns actually
+   * interrupted.
+   * @returns how many live sessions were targeted and how many were mid-turn.
+   */
+  private async cancelAllSessions(): Promise<{ stopped: number; running: number }> {
+    const ids = await this.liveSessionIds();
+    let stopped = 0;
+    let running = 0;
+    for (const sessionId of ids) {
+      const agent = this.options.agentStore.get(sessionId);
+      if (agent === undefined) continue;
+      if (agent.status === 'running') running += 1;
+      agent.cancel({ kind: 'user' }, { keepInbox: true });
+      stopped += 1;
+      this.options.logger.debug(
+        `stop: cancelled session ${sessionId} (chat ${
+          this.options.sessionMap.chatFor(sessionId) ?? 'unbound'
+        }, status ${agent.status})`,
+      );
+    }
+    return { stopped, running };
   }
 
   /**
@@ -1180,6 +1333,7 @@ export class Bridge {
     'sessions',
     'find-session',
     'cancel',
+    'stop',
     'group',
     'model',
     'panel',
@@ -3390,6 +3544,7 @@ export class Bridge {
             formValue: {},
           },
         ),
+      stopEverything: (invocation) => bridge.stopEverything(invocation),
     };
   }
 }

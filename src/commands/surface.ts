@@ -87,6 +87,7 @@ const COMMAND_HELP_KEYS: Readonly<Record<string, MessageKey>> = {
   group: 'command.help.group',
   imagecard: 'command.help.imagecard',
   cancel: 'command.help.cancel',
+  stop: 'command.help.stop',
   cd: 'command.help.cd',
   repo: 'command.help.repo',
   status: 'command.help.status',
@@ -203,6 +204,13 @@ export interface SurfaceCommandHost {
         },
       ) => { ok: true } | { ok: false; text: string })
     | undefined;
+  /**
+   * The global stop (`/stop`): cancel EVERY live session's turn, then run the
+   * allowlisted `stop` cleanup script (when configured) to hard-kill the
+   * process trees the graceful cancel missed. Deliberately global — it is the
+   * panic button, not a per-chat `/cancel`.
+   */
+  stopEverything(invocation: CommandInvocation): Promise<CommandResult>;
 }
 
 /**
@@ -348,6 +356,17 @@ export function registerSurfaceCommands(commands: CommandRegistry, host: Surface
       }
       return { kind: 'error', text: t('command.error.noSessionStop') };
     },
+  });
+  // /stop: the PANIC button. Unlike /cancel (this chat's turn), it stops every
+  // live session and then hands off to the allowlisted `stop` script from
+  // `slashCommands` — the line's extra args go to that script. The handler
+  // never starts a turn, and the working-state gate allows it mid-turn.
+  commands.register({
+    name: 'stop',
+    description: 'Stop every running turn across all chats and run the configured cleanup script',
+    category: 'session',
+    buttonLabel: t('command.cmd.stop.label'),
+    handler: (invocation) => options.stopEverything(invocation),
   });
   commands.register({
     name: 'cd',

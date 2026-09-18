@@ -126,6 +126,7 @@ rm -rf ~/.dsh/profiles/feishu ~/.dsh/feishu
 | `/panel` | 打开控制面板卡（所有命令的按钮版） |
 | `/group <name>` | 和机器人建群（无参会弹名称输入卡） |
 | `/cancel` | 停下正在跑的回合 |
+| `/stop [args]` | **紧急按钮**：停掉所有聊天里正在跑的回合，然后执行配置里名为 `stop` 的清理脚本（见 `slashCommands`） |
 | `/cd <path>` | 设置本聊天的工作目录（无参会弹路径输入卡） |
 | `/repo [path]` | 挑一个项目目录（无参扫描默认 roots；`/repo <path>` 扫描该路径） |
 | `/status` | 查看本聊天的会话状态 |

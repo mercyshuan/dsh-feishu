@@ -17,6 +17,13 @@ export interface CommandInvocation {
   readonly senderOpenId: string;
   /** Text following the command name (separator whitespace included). */
   readonly rawInput: string;
+  /**
+   * The inbound message that carried the command, when it arrived as a message.
+   * A panel button has no message of its own and omits it. Commands that hand
+   * their arguments to a local script expose it to that script's `{card}`
+   * placeholder (the message this run was triggered from).
+   */
+  readonly messageId?: string;
 }
 
 /** A settled command outcome, rendered by the surface. */

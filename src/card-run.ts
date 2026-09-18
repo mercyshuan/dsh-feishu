@@ -252,6 +252,16 @@ export class CardCommandRunner {
     return [...this.specs.keys()];
   }
 
+  /**
+   * Whether a name is allowlisted (the typed-slash path decides between "run
+   * this entry" and "fall through to the dsh passthrough" with it).
+   * @param name - the name a card button or slash line references.
+   * @returns whether the configured allowlist contains it.
+   */
+  has(name: string): boolean {
+    return this.specs.has(name);
+  }
+
   /** Whether a run is still alive for this chat. */
   isBusy(chatId: string): boolean {
     return this.active.has(chatId);

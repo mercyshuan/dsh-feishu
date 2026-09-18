@@ -147,6 +147,7 @@ feels faster; `/help` lists them all.
 | `/panel` | open the control-panel card (all commands as buttons) |
 | `/group <name>` | create a group with the bot (bare opens a name-input card) |
 | `/cancel` | stop the running turn |
+| `/stop [args]` | **panic button**: stop every running turn in every chat, then run the configured `stop` cleanup script (see `slashCommands`) |
 | `/cd <path>` | set this chat's working directory (bare opens a path-input card) |
 | `/repo [path]` | pick a project directory (bare scans the default roots; `/repo <path>` scans that path) |
 | `/status` | show this chat's session status |

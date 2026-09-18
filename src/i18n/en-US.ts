@@ -473,4 +473,20 @@ export const enMessages = {
   'cardRun.failed': '🚫 Card command "{name}" could not start: {detail}',
   'command.error.cardCommandUnavailable':
     '🚫 The card-command seam is not available in this deployment (no cardCommands runner).',
+
+  // ── Typed slash lines bound to local commands (the slashCommands seam) ───
+  'slashRun.started': '▶️ `/{name}` started as pid {pid}. Log: {log}',
+  'slashRun.notAllowed': '🚫 `/{name}` is not in the configured slashCommands allowlist.',
+  'slashRun.busy': '⏳ `/{name}` is already running ({detail}) — wait for it to finish.',
+  'slashRun.invalid': '🚫 The slash line is invalid: {detail}',
+  'slashRun.failed': '🚫 `/{name}` could not start: {detail}',
+
+  // ── /stop: the global panic button ──────────────────────────────────────
+  'command.cmd.stop.label': '🛑 Stop everything',
+  'command.help.stop':
+    'Stop every running turn across all chats, then run the configured `stop` cleanup script',
+  'command.stop.noSessions': 'No live session to stop.',
+  'command.stop.cancelled': '🛑 Stopped {count} live session(s) ({running} mid-turn).',
+  'command.stop.noScript':
+    '⚠️ No `stop` entry in slashCommands — only the in-process turns were cancelled.',
 } as const;

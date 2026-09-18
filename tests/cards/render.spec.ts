@@ -701,10 +701,9 @@ describe('panelPages', () => {
   });
 
   it('closes the FIRST page with the card group (the shipped palette layout)', () => {
-    // The shipped set: agent(5) + session(5) exactly filled page 1 at the old
-    // page size, and a category block is never split — so the skill-control
-    // card group could only ever land on page 2. The page size was raised by
-    // exactly one so the new group ENDS page 1 and page 2 keeps its contents.
+    // The shipped set: agent(5) + session(6, `/stop` joined) + card(1) fill
+    // page 1 exactly, and a category block is never split — so the skill-control
+    // card group ENDS page 1 and page 2 keeps its contents (chat + system).
     const shipped: PanelCommand[] = [
       ...(
         [
@@ -718,6 +717,7 @@ describe('panelPages', () => {
       ...(
         [
           ['cancel', '⏹ Stop'],
+          ['stop', '🛑 Stop everything'],
           ['cd', '📁 Change dir'],
           ['repo', '📚 Pick project'],
           ['sessions', '🗂️ Sessions'],

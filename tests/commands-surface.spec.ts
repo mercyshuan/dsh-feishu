@@ -125,6 +125,7 @@ function makeCommands(overrides: Partial<SurfaceCommandHost> = {}): {
     lastOutput: () => undefined,
     liveAgent: () => undefined,
     sendLog: async () => ({ kind: 'success', text: 'sent' }),
+    stopEverything: async () => ({ kind: 'success', text: 'stopped everything' }),
     ...overrides,
   };
   const commands = new CommandRegistry();

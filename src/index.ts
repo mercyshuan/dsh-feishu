@@ -58,6 +58,8 @@ import { createMemoryTransport } from './memory-transport.js';
 import { registerSendFileTool } from './outbound.js';
 import type { SessionExportEvent } from './session-export.js';
 import { SessionMap } from './session-map.js';
+import type { SlashCommandConfig } from './slash-commands.js';
+import { normalizeSlashCommands } from './slash-commands.js';
 import { createLarkTransport } from './transport.js';
 
 /** Stable cordis plugin name (also the bundle row id in cordis.patch.yml). */
@@ -131,6 +133,16 @@ export interface Config {
    */
   readonly cardCommands?: CardCommandConfig[];
   /**
+   * Allowlisted local commands a TYPED slash line may run directly, bypassing
+   * the agent entirely (no model, no tokens): the line's name selects one entry
+   * and only its configured `file` + fixed `args` + `cwd` decide what runs, so
+   * a line can never point the surface at an arbitrary path. Absent/empty means
+   * the seam is OFF and every slash line keeps its old passthrough behavior.
+   * An entry named `stop` is the cleanup script `/stop` runs after cancelling
+   * every live session (see `slash-commands.ts`).
+   */
+  readonly slashCommands?: SlashCommandConfig[];
+  /**
    * UI language for everything the bot says on the Feishu surface (cards,
    * panels, command labels, gate notices). Default `en-US`. Falls back to
    * the `FEISHU_LOCALE` environment variable.
@@ -196,6 +208,16 @@ export const Config: z<Config> = z.object({
   repoRoots: z.array(z.string()).required(false),
   requireWorkingDir: z.boolean().required(false),
   cardCommands: z
+    .array(
+      z.object({
+        name: z.string(),
+        file: z.string().required(false),
+        args: z.array(z.string()).required(false),
+        cwd: z.string().required(false),
+      }),
+    )
+    .required(false),
+  slashCommands: z
     .array(
       z.object({
         name: z.string(),
@@ -758,6 +780,9 @@ export function apply(ctx: Context, config: Config, deps: ApplyDeps = {}): void 
       : {}),
     ...(config.cardCommands !== undefined
       ? { cardCommands: normalizeCardCommands(config.cardCommands) }
+      : {}),
+    ...(config.slashCommands !== undefined
+      ? { slashCommands: normalizeSlashCommands(config.slashCommands) }
       : {}),
     ...(config.reactions !== undefined ? { reactions: config.reactions } : {}),
     identityAliasesFile,

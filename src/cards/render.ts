@@ -790,18 +790,19 @@ export interface PanelCommand {
 /**
  * Command buttons per panel page. Feishu wraps a long button row, so a page
  * can carry more than the historical 8: the AGENT group (model / permission /
- * agent preset / plan) plus the session and chat groups (4 + 5 + 1) must land
- * on ONE first page — those mode commands are the ones users reach for, and a
- * palette that hides them behind a page flip reads as "the panel has no
- * preset" (user reports). The whole system block then keeps page 2.
+ * agent preset / plan) plus the session and chat groups must land on ONE first
+ * page — those mode commands are the ones users reach for, and a palette that
+ * hides them behind a page flip reads as "the panel has no preset" (user
+ * reports).
  *
- * Raised to 11 for the `card` group (the skill-control card button): page 1
- * was EXACTLY full at 10 (agent 5 + session 5) and a category block is never
- * split, so without one more slot the card button could only ever land on
- * page 2. With 11 the first page is agent + session + card and page 2 keeps
- * its previous contents (chat + system).
+ * The group sizes moved twice, and a category block is NEVER split across
+ * pages, so the number is derived rather than round:
+ *   agent(5) + session(6, `/stop` joined) = 11 → + the `card` group(1) = 12.
+ * Anything smaller pushes the whole session (or card) group to page 2, which
+ * is how the card button ended up there when it was added (`Raised to 11 for
+ * the card group …`). Page 2 then keeps chat + system, exactly as before.
  */
-export const PANEL_PAGE_SIZE = 11;
+export const PANEL_PAGE_SIZE = 12;
 
 /** A panel page entry: a category header or one command button. */
 export type PanelPageEntry =

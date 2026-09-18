@@ -7,7 +7,8 @@
  * covered end to end without any network).
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import type { Agent } from '@deepseek-ai/dsh-agent';
@@ -27,6 +28,7 @@ import {
   sniffExtension,
   turnTitle,
 } from '../src/bridge.js';
+import { PANEL_PAGE_SIZE } from '../src/cards/render.js';
 import { SESSION_SELECT_MAX } from '../src/cards/session-list.js';
 import { StreamingCardManager } from '../src/cards/streaming.js';
 import type { CommandResult } from '../src/commands.js';
@@ -285,6 +287,7 @@ function makeHarness(
     identityInjection?: boolean;
     contextMerge?: NonNullable<BridgeOptions['contextMerge']>;
     cardCommands?: NonNullable<BridgeOptions['cardCommands']>;
+    slashCommands?: NonNullable<BridgeOptions['slashCommands']>;
   } = {},
 ): Harness {
   const transport = new RecordingTransport();
@@ -333,6 +336,7 @@ function makeHarness(
     ...(options.unknownCommand !== undefined ? { unknownCommand: options.unknownCommand } : {}),
     ...(options.repoRoots !== undefined ? { repoRoots: options.repoRoots } : {}),
     ...(options.cardCommands !== undefined ? { cardCommands: options.cardCommands } : {}),
+    ...(options.slashCommands !== undefined ? { slashCommands: options.slashCommands } : {}),
     ...(options.listSessions !== undefined ? { listSessions: options.listSessions } : {}),
     ...(options.permissionPresets !== undefined
       ? { permissionPresets: options.permissionPresets }
@@ -1767,7 +1771,9 @@ describe('Bridge', () => {
     });
 
     it('an external card button (kind run) runs an allowlisted command with no agent turn', async () => {
-      const out = join(SCRATCH, `card-run-${Date.now()}.txt`);
+      // A private dir: the spawned child outlives the harness SCRATCH, which
+      // afterEach removes.
+      const out = join(mkdtempSync(`${tmpdir()}/dsh-feishu-card-run-`), 'out.txt');
       const h = makeHarness({
         cardCommands: [
           {
@@ -3181,6 +3187,91 @@ describe('session commands (/sessions /resume /clear /new)', () => {
   });
 });
 
+describe('typed slash lines bound to local commands (slashCommands)', () => {
+  it('runs the allowlisted entry instead of an agent turn', async () => {
+    // A private dir: the spawned child outlives SCRATCH (the harness removes it
+    // in afterEach), so the output must not live under the harness scratch.
+    const out = join(mkdtempSync(`${tmpdir()}/dsh-feishu-slash-`), 'out.txt');
+    const h = makeHarness({
+      slashCommands: [
+        {
+          name: 'imgtest',
+          file: process.execPath,
+          args: [
+            '-e',
+            'require("node:fs").writeFileSync(process.argv[1], process.argv.slice(2).join("|"))',
+            out,
+          ],
+        },
+      ],
+    });
+    await h.bridge.handleMessage(message({ text: '/imgtest one two' }));
+    // No agent turn: the line ran the LOCAL command instead.
+    expect(h.agentStore.followups.get('feishu-session-1')).toBeUndefined();
+    for (let i = 0; i < 200 && !existsSync(out); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    // The line's own trailing text became argv, whitespace-split and literal.
+    expect(readFileSync(out, 'utf8')).toBe('one|two');
+    expect(h.transport.sentTexts.some((t) => t.text.includes('/imgtest'))).toBe(true);
+  });
+
+  it('leaves a name outside the allowlist to the usual command policy', async () => {
+    const h = makeHarness({
+      slashCommands: [{ name: 'other', file: process.execPath, args: ['-e', 'process.exit(0)'] }],
+    });
+    await h.bridge.handleMessage(message({ text: '/imgtest' }));
+    // Not allowlisted → the registered-command/unknown policy answers as before.
+    expect(h.transport.sentTexts.some((t) => t.text.includes('imgtest'))).toBe(true);
+  });
+});
+
+describe('/stop (the global panic button)', () => {
+  it('cancels every live session and reports the counts', async () => {
+    const h = makeHarness();
+    await h.bridge.handleMessage(message()); // oc_chat → session-1, mid-turn
+    h.sessionMap.set('oc_other', 'feishu-session-2');
+    await h.agentStore.create('feishu-session-2', '/work');
+    h.agentStore.setStatus('feishu-session-2', 'idle');
+
+    await h.bridge.handleMessage(message({ messageId: 'om_msg2', text: '/stop' }));
+
+    // BOTH sessions are cancelled — /stop is global, unlike per-chat /cancel.
+    expect([...h.agentStore.cancels].sort()).toEqual(['feishu-session-1', 'feishu-session-2']);
+    const reply = h.transport.sentTexts.at(-1)?.text ?? '';
+    expect(reply).toContain('2'); // live sessions
+    expect(reply).toContain('1'); // mid-turn
+    // No `stop` entry configured → the reply says the cleanup half was skipped
+    // instead of silently implying a hard kill happened.
+    expect(reply).toContain('stop');
+  });
+
+  it('runs the configured stop cleanup script with the line args', async () => {
+    const out = join(mkdtempSync(`${tmpdir()}/dsh-feishu-stop-`), 'out.txt');
+    const h = makeHarness({
+      slashCommands: [
+        {
+          name: 'stop',
+          file: process.execPath,
+          args: [
+            '-e',
+            'require("node:fs").writeFileSync(process.argv[1], process.argv.slice(2).join("|"))',
+            out,
+          ],
+        },
+      ],
+    });
+    await h.bridge.handleMessage(message());
+    await h.bridge.handleMessage(message({ messageId: 'om_msg2', text: '/stop --all' }));
+    expect(h.agentStore.cancels).toEqual(['feishu-session-1']);
+    for (let i = 0; i < 200 && !existsSync(out); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(readFileSync(out, 'utf8')).toBe('--all');
+    expect(h.transport.sentTexts.at(-1)?.text ?? '').toContain('/stop');
+  });
+});
+
 describe('panel command palette', () => {
   it('ends page 1 with the image-card button', async () => {
     const h = makeHarness();
@@ -3197,13 +3288,15 @@ describe('panel command palette', () => {
       .flatMap((row) => row.actions)
       .filter((el) => el.tag === 'button' && el.value?.kind === 'command')
       .map((el) => el.value?.name);
-    // Page 1 = agent(5) + session(5) + card(1); the card group closes it.
+    // Page 1 = agent(5) + session(6) + card(1) = PANEL_PAGE_SIZE; the card
+    // group closes it (adding `/stop` moved the constant, not this rule).
     expect(commandNames.at(-1)).toBe('imagecard');
-    expect(commandNames).toHaveLength(11);
+    expect(commandNames).toHaveLength(PANEL_PAGE_SIZE);
   });
 
   it('the image-card button runs the allowlisted create command (no agent turn)', async () => {
-    const out = join(SCRATCH, `panel-card-create-${Date.now()}.txt`);
+    // Same rule: never point a spawned child at the harness SCRATCH.
+    const out = join(mkdtempSync(`${tmpdir()}/dsh-feishu-panel-card-`), 'out.txt');
     const h = makeHarness({
       cardCommands: [
         {
