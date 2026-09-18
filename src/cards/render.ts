@@ -6,10 +6,12 @@
  * Layout mirrors DSH web (feedback-driven): a chronological sequence of
  * one-line rows — think rows and tool rows — each with an expand button,
  * then the complete output at the bottom, then the execution status and the
- * button area. Folded (the default), that sequence collapses to one line of
- * the model's CURRENT thinking ({@link collapseThought}) — not the tool-name
- * trail (user feedback). Every row carries a stable id so a button tap can
- * open that exact row's details card.
+ * button area. A WORKING card folds to one line of the model's CURRENT
+ * thinking ({@link collapseThought}) — not the tool-name trail (user
+ * feedback); a FINISHED card folds to just the answer plus the stats line,
+ * with the whole process one tap away behind ▸ Expand (user request). Every
+ * row carries a stable id so a button tap can open that exact row's details
+ * card.
  *
  * @module @dsh-feishu/dsh-feishu/cards/render
  */
@@ -21,6 +23,7 @@ import type { MessageKey } from '../i18n/index.js';
 import { t } from '../i18n/index.js';
 import type { ProjectInfo } from '../projects.js';
 import { markdownToElements } from './markdown.js';
+import { formatRmb } from './pricing.js';
 import { toolRowTitle } from './tool-summary.js';
 
 /** Terminal/working state of one streaming card. `stopped` is the terminal
@@ -103,6 +106,10 @@ export interface CardSnapshot {
     /** The current context size (latest request input + cache-read tokens);
      *  feeds the context-occupancy group. */
     readonly currentContextTokens: number | undefined;
+    /** This session's tokens priced in CNY (see `cards/pricing.ts`), or
+     *  undefined when the session has no same-process usage to price (a
+     *  durable-log replay). Rendered as the trailing `¥` group. */
+    readonly costRmb?: number | undefined;
   };
   readonly status: CardStatus;
   /** Friendly, actionable explanation of a failed turn, shown on the error
@@ -347,11 +354,18 @@ export function actionValue(action: SurfaceAction): Record<string, string> {
   return value;
 }
 
-/** The button rows appended by status: row 1 = state actions (working →
- *  stop; done → copy/retry/panel; error → retry/panel), row 2 = the row
- *  view toggle when the turn has rows. Two rows keep each action row short
- *  on mobile. */
-function statusButtonRows(status: CardStatus, hasRows: boolean, collapsed: boolean): CardElement[] {
+/** The SINGLE button row appended to a streaming card: the state action first
+ *  (working → Stop reply; every terminal state → Panel), immediately followed
+ *  by the row-view toggle (`▸ Expand` / `▾ Collapse`) when the turn has rows.
+ *  One row of two keeps the card compact; Copy / Retry are deliberately NOT
+ *  card buttons (the answer is selectable in place, the typed `/` line and the
+ *  retry action stay available elsewhere) — user request. */
+function statusButtonRows(
+  status: CardStatus,
+  hasRows: boolean,
+  _collapsed: boolean,
+  toggleLabel: string,
+): CardElement[] {
   const actions: Array<{
     readonly tag: 'button';
     readonly text: { readonly tag: 'plain_text'; readonly content: string };
@@ -366,42 +380,21 @@ function statusButtonRows(status: CardStatus, hasRows: boolean, collapsed: boole
       value: actionValue({ kind: 'stop' }),
     });
   } else {
-    if (status === 'done') {
-      actions.push({
-        tag: 'button',
-        text: { tag: 'plain_text', content: t('card.button.copy') },
-        value: actionValue({ kind: 'copy' }),
-      });
-    }
-    actions.push({
-      tag: 'button',
-      text: { tag: 'plain_text', content: t('card.button.retry') },
-      value: actionValue({ kind: 'retry' }),
-    });
     actions.push({
       tag: 'button',
       text: { tag: 'plain_text', content: t('card.button.panel') },
       value: actionValue({ kind: 'panel' }),
     });
   }
-  const rows: CardElement[] = [{ tag: 'action', actions }];
   if (hasRows) {
-    rows.push({
-      tag: 'action',
-      actions: [
-        {
-          tag: 'button',
-          text: {
-            tag: 'plain_text',
-            content: collapsed ? t('card.button.expand') : t('card.button.collapse'),
-          },
-          type: 'default',
-          value: actionValue({ kind: 'toggle-rows' }),
-        },
-      ],
+    actions.push({
+      tag: 'button',
+      text: { tag: 'plain_text', content: toggleLabel },
+      type: 'default',
+      value: actionValue({ kind: 'toggle-rows' }),
     });
   }
-  return rows;
+  return [{ tag: 'action', actions }];
 }
 
 /**
@@ -579,6 +572,12 @@ export function statsGrouperText(stats: CardSnapshot['sessionStats']): string {
     );
     groups.push(t('card.stats.context', { percent }));
   }
+  // Session cost last: the money figure the user asked to see at the bottom of
+  // the card. Absent when the session carries no same-process token usage
+  // (e.g. a durable-log replay after a restart).
+  if (stats.costRmb !== undefined && stats.costRmb > 0) {
+    groups.push(t('card.stats.cost', { amount: formatRmb(stats.costRmb) }));
+  }
   return groups.join(' | ');
 }
 
@@ -592,11 +591,16 @@ export function statsGrouperText(stats: CardSnapshot['sessionStats']): string {
 export function buildCard(snapshot: CardSnapshot): CardJson {
   const elements: CardElement[] = [];
   const collapsed = snapshot.collapsed ?? false;
-  if (collapsed && snapshot.rows.length > 0) {
-    // Folded: the current thinking, one line (never the tool-name trail).
+  if (collapsed && snapshot.rows.length > 0 && snapshot.status === 'working') {
+    // Folded WHILE RUNNING: the current thinking, one line (never the
+    // tool-name trail) — the one case where the surface shows progress
+    // without expanding. A FINISHED (or stopped/failed) card hides thinking
+    // and tool rows entirely while folded: the answer and the stats line are
+    // the card, and the process is one tap away behind ▸ Expand (user
+    // request). The full row sequence renders whenever the card is expanded.
     const thought = collapseThought(snapshot.rows);
     if (thought !== '') elements.push({ tag: 'markdown', content: thought });
-  } else {
+  } else if (!collapsed) {
     for (const row of snapshot.rows) {
       elements.push(rowElement(row));
     }
@@ -679,9 +683,16 @@ export function buildCard(snapshot: CardSnapshot): CardJson {
     elements.push({ tag: 'hr' });
     elements.push({ tag: 'markdown', content: statsText });
   }
-  // Two button rows: row 1 = state actions (Stop / Copy·Retry·Panel), row 2
-  // = the row view toggle — one row of 4 wrapped awkwardly on mobile.
-  elements.push(...statusButtonRows(snapshot.status, snapshot.rows.length > 0, collapsed));
+  // ONE button row: the state action, then the row-view toggle right after it
+  // (user request — the toggle used to sit alone on a second row).
+  elements.push(
+    ...statusButtonRows(
+      snapshot.status,
+      snapshot.rows.length > 0,
+      collapsed,
+      collapsed ? t('card.button.expand') : t('card.button.collapse'),
+    ),
+  );
   return {
     config: { wide_screen_mode: true },
     header: {
@@ -795,20 +806,18 @@ export interface PanelCommand {
 
 /**
  * Command buttons per panel page. Feishu wraps a long button row, so a page
- * can carry more than the historical 8: the AGENT group (model / permission /
- * agent preset / plan) plus the session and chat groups must land on ONE first
- * page — those mode commands are the ones users reach for, and a palette that
- * hides them behind a page flip reads as "the panel has no preset" (user
- * reports).
- *
- * The group sizes moved twice, and a category block is NEVER split across
- * pages, so the number is derived rather than round:
- *   agent(5) + session(6, `/stop` joined) = 11 → + the `card` group(1) = 12.
- * Anything smaller pushes the whole session (or card) group to page 2, which
- * is how the card button ended up there when it was added (`Raised to 11 for
- * the card group …`). Page 2 then keeps chat + system, exactly as before.
+ * can carry more than the historical 8. A category block is NEVER split
+ * across pages, so this is the capacity of pages AFTER the first.
  */
 export const PANEL_PAGE_SIZE = 12;
+
+/** The favorites category id: its commands take the whole FIRST page. */
+export const PANEL_COMMON_CATEGORY = 'common';
+
+/** Buttons on the first page: exactly the favorites group (user request — the
+ *  panel must open on a small, hand-picked set, with everything else one tap
+ *  away on page 2). The group is never split, so paging starts at page 2. */
+export const PANEL_FIRST_PAGE_SIZE = 4;
 
 /** A panel page entry: a category header or one command button. */
 export type PanelPageEntry =
@@ -816,12 +825,14 @@ export type PanelPageEntry =
   | { readonly type: 'button'; readonly name: string; readonly label: string };
 
 /**
- * Paginate the panel command palette. Commands are grouped by category in
- * input order; a category header precedes its first button (and rides to the
- * next page when the break lands between the header and that button, so a
- * page never shows an unlabeled command group).
+ * Paginate the panel command palette. The `common` group (favorites) always
+ * takes the whole FIRST page on its own; every other category is packed into
+ * the following pages with {@link PANEL_PAGE_SIZE} buttons each. Commands are
+ * grouped by category in input order; a category header precedes its first
+ * button (and rides to the next page when the break lands between the header
+ * and that button, so a page never shows an unlabeled command group).
  * @param commands - panel commands (already grouped by category).
- * @param pageSize - buttons per page.
+ * @param pageSize - buttons per page AFTER the first page.
  * @returns pages of entries (headers + buttons).
  */
 export function panelPages(
@@ -844,12 +855,29 @@ export function panelPages(
     block.push({ type: 'button', name: command.name, label: command.buttonLabel });
   }
   if (block.length > 0) blocks.push(block);
+  // The favorites block is the first page on its own; the rest pack from an
+  // EMPTY accumulator so page 2 starts at full capacity.
+  const pages: PanelPageEntry[][] = [];
+  let rest = blocks;
+  const first = blocks.find((entry) =>
+    entry.some((item) => item.type === 'header' && item.label === PANEL_COMMON_CATEGORY),
+  );
+  if (first !== undefined) {
+    const firstButtons = first.filter((entry) => entry.type === 'button').length;
+    if (firstButtons > PANEL_FIRST_PAGE_SIZE) {
+      throw new Error(
+        `panel: the ${PANEL_COMMON_CATEGORY} group has ${firstButtons} buttons, over the ` +
+          `${PANEL_FIRST_PAGE_SIZE}-button favorites page`,
+      );
+    }
+    pages.push(first);
+    rest = blocks.filter((entry) => entry !== first);
+  }
   // Pack whole blocks into pages; only start a new page when the NEXT block
   // would overflow the page size.
-  const pages: PanelPageEntry[][] = [];
   let page: PanelPageEntry[] = [];
   let buttons = 0;
-  for (const next of blocks) {
+  for (const next of rest) {
     const nextButtons = next.filter((entry) => entry.type === 'button').length;
     if (buttons > 0 && buttons + nextButtons > pageSize) {
       pages.push(page);
@@ -868,6 +896,7 @@ export function panelPages(
 function categoryLabel(category: string): string {
   // Known categories come from the catalog; an unknown id keeps the
   // capitalized fallback so a future category still renders labeled.
+  if (category === PANEL_COMMON_CATEGORY) return t('panel.category.common');
   if (category === 'agent') return t('panel.category.agent');
   if (category === 'session') return t('panel.category.session');
   if (category === 'card') return t('panel.category.card');
@@ -880,11 +909,14 @@ function categoryLabel(category: string): string {
 
 /**
  * Build the control-panel card: a standing operation surface the user can
- * click without typing a slash command. The first action row carries the
- * core buttons (Stop while running / Retry / Copy); below it the full
- * command palette — every registered surface command as a button, grouped by
- * category and paginated (everything-is-a-card: the button executes the same
- * handler as the slash line).
+ * click without typing a slash command.
+ *
+ * PAGE 1 is the small favorites palette — the `common` group alone (🤖 Agent /
+ * 🛑 Stop everything / 📚 Pick project / 🎨 Image card). Everything else, the
+ * core action row (⏹ Stop current turn while running, 🔁 Retry last,
+ * 📋 Copy last) included, lives from page 2 on: the first page is a launcher,
+ * not the full palette (user request).
+ *
  * @param statusLine - a short current-state line for the panel body.
  * @param running - whether a turn is actively running (show Stop).
  * @param commands - the full command palette (registration order).
@@ -897,42 +929,43 @@ export function buildPanelCard(
   commands: readonly PanelCommand[] = [],
   page = 0,
 ): CardJson {
-  const core: Array<{
-    readonly tag: 'button';
-    readonly text: { readonly tag: 'plain_text'; readonly content: string };
-    readonly type?: 'primary' | 'danger' | 'default';
-    readonly value: Record<string, string>;
-  }> = [];
-  if (running) {
-    core.push({
-      tag: 'button',
-      text: { tag: 'plain_text', content: t('card.panel.stopTurn') },
-      type: 'danger',
-      value: actionValue({ kind: 'stop' }),
-    });
-  }
-  core.push(
-    {
-      tag: 'button',
-      text: { tag: 'plain_text', content: t('card.panel.retryLast') },
-      value: actionValue({ kind: 'retry' }),
-    },
-    {
-      tag: 'button',
-      text: { tag: 'plain_text', content: t('card.panel.copyLast') },
-      value: actionValue({ kind: 'copy' }),
-    },
-  );
-  const elements: CardElement[] = [
-    { tag: 'markdown', content: statusLine },
-    { tag: 'hr' },
-    { tag: 'action', actions: core },
-  ];
+  const elements: CardElement[] = [{ tag: 'markdown', content: statusLine }];
   if (commands.length > 0) {
     const pages = panelPages(commands);
     const total = pages.length;
     const index = Math.min(Math.max(page, 0), total - 1);
     const entries = pages[index] ?? [];
+    // The core action row follows page 2's own content, separated by a rule —
+    // absent on the favorites page (page 1 is favorites ONLY).
+    if (index > 0) {
+      const core: Array<{
+        readonly tag: 'button';
+        readonly text: { readonly tag: 'plain_text'; readonly content: string };
+        readonly type?: 'primary' | 'danger' | 'default';
+        readonly value: Record<string, string>;
+      }> = [];
+      if (running) {
+        core.push({
+          tag: 'button',
+          text: { tag: 'plain_text', content: t('card.panel.stopTurn') },
+          type: 'danger',
+          value: actionValue({ kind: 'stop' }),
+        });
+      }
+      core.push(
+        {
+          tag: 'button',
+          text: { tag: 'plain_text', content: t('card.panel.retryLast') },
+          value: actionValue({ kind: 'retry' }),
+        },
+        {
+          tag: 'button',
+          text: { tag: 'plain_text', content: t('card.panel.copyLast') },
+          value: actionValue({ kind: 'copy' }),
+        },
+      );
+      elements.push({ tag: 'hr' }, { tag: 'action', actions: core });
+    }
     // Quiet page indicator — a note, not another bold line.
     elements.push({
       tag: 'note',

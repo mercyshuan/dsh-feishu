@@ -36,16 +36,23 @@ user feedback rounds 2–5.
    `**⏹ Stopping…**` (visible progress); in a terminal state, a quiet
    `note` (`✅ Done` / `⏹ Stopped` / `⚠️ Turn ended with an error`) — the
    header template color already carries the semantic (see 1.4).
-4. **Button area** — two rows (Section 3.1): state actions, then the row
-   view toggle.
+4. **Button area** — ONE row (Section 3.1): the state action, immediately
+   followed by the row view toggle.
 
-The card is **collapsed by default**: the row sequence is replaced by one
-line of the model's **CURRENT thinking** — the newest non-empty reasoning
-block, flattened onto one line and clipped to its tail
-(`MAX_COLLAPSED_THINK_CHARS`, prefixed `…` when clipped). When the turn has
-no reasoning text at all (a model that emits none, or a turn that went
-straight to tools), the line falls back to the latest row's own line so the
-folded card still says what is happening. The button area gains `▸ Expand`.
+The card is **collapsed by default**, and the fold means different things
+while the turn runs and after it settles:
+
+- **Working**: the row sequence is replaced by one line of the model's
+  **CURRENT thinking** — the newest non-empty reasoning block, flattened onto
+  one line and clipped to its tail (`MAX_COLLAPSED_THINK_CHARS`, prefixed `…`
+  when clipped). When the turn has no reasoning text at all (a model that
+  emits none, or a turn that went straight to tools), the line falls back to
+  the latest row's own line so the folded card still says what is happening.
+  The button area carries `▸ Expand`.
+- **Finished** (done / stopped / error): thinking and tool rows are hidden
+  **entirely** — a finished collapsed card is the answer plus the stats line,
+  and the whole process is one tap away behind `▸ Expand` (user request).
+  Expanding renders the full chronological row sequence.
 
 > Replaced the earlier row-name trail `think → bash → read → …` (user
 > feedback): a column of tool names says which tools ran, not what the model
@@ -85,9 +92,10 @@ done|stopped|error --any action--->  same (state unchanged; card re-synced)
   first (botmux rule: Lark can otherwise restore the pre-click card — the
   root of the "reverts to working" bugs).
 - **Collapsed**: `collapsed` is part of the state; `▸ Expand`/`▾ Collapse`
-  flips it. While collapsed, the thinking line streams (recomputed from the
-  rows — the newest reasoning text — on every sync). A new turn resets to
-  collapsed.
+  flips it. While a turn is WORKING and collapsed, the thinking line streams
+  (recomputed from the rows — the newest reasoning text — on every sync); a
+  FINISHED collapsed card renders no row at all (user request). A new turn
+  resets to collapsed.
 - **Compaction is not a turn** (user report): `/compact` runs a
   `compaction/start → summary → end` transaction with no `turn/end`, so the
   the streaming-card controller handles the compaction card lifecycle — `compaction/start`
@@ -182,14 +190,16 @@ Reference: user feedback rounds 1–5; botmux control cards.
 
 ### 3.1 Status button area (bottom of streaming card)
 
-Two action rows keep each short on mobile:
+ONE action row, state action first and the view toggle right after it
+(user request — the toggle used to sit alone on a second row):
 
-- **Row 1 — state actions**
-  - **working**: `⏹ Stop turn`.
-  - **done**: `📋 Copy`, `🔁 Retry`, `⚙️ Panel`.
-  - **error**: `🔁 Retry`, `⚙️ Panel`.
-- **Row 2 — view toggle** (only when rows exist): `▾ Collapse` /
-  `▸ Expand`.
+- **working**: `⏹ Stop turn`, then `▸ Expand` / `▾ Collapse` when rows exist.
+- **done / stopped / error**: `⚙️ Panel`, then `▸ Expand` / `▾ Collapse`
+  when rows exist.
+
+`📋 Copy` and `🔁 Retry` are deliberately NOT card buttons any more (user
+request): the answer is selectable in place, and retry stays available on the
+panel's page 2 (`🔁 Retry last`) and as a typed action.
 
 ### 3.2 Row ⋯ buttons
 
@@ -204,7 +214,7 @@ id (`think-N` or the tool `callId`), never an index.
 | `stop` | `agent.cancel({kind:'user'}, {keepInbox:true})` (the DSH web Stop) + `⏹ Stopping…` text. No live agent → explanatory text. |
 | `copy` | resend last output as text |
 | `retry` | re-deliver last prompt on a fresh turn/card |
-| `panel` | open the panel card (stop/retry/copy) |
+| `panel` | open the panel card (page 1 favorites: agent / stop everything / pick project / image card; page 2 onward: the palette plus Stop-retry-copy) |
 | `toggle-rows` | flip collapsed bit; re-render (deferred patch) |
 | `row-details` | open the row's details card; re-assert streaming card |
 | `repo-pick` / `repo-page` | repo picker (Section 6) |
@@ -467,16 +477,24 @@ menu root and reposts the menu card, so page flips and Back never go dead
 (user report: after a render failure "换页按钮不再有反应").
 
 - Menu (`⚙️ dsh-feishu panel`): `buildPanelCard(statusLine, running,
-  commands, page)` — the core row (Stop while running / Retry / Copy) stays
-  first; below it the full command palette, grouped by category with emoji
-  headers (`🤖 Agent` / `🧩 Session` / `🎨 Card` / `💬 Chat` / `⚙️ System`),
-  `PANEL_PAGE_SIZE = 12` buttons per page, a quiet `note` page indicator
-  (`Commands · page 1/2`), and ◀️/▶️ nav hidden at the bounds. Each button
-  stamps `{kind:'command', name}` and executes the same handler as the slash
-  line. The status line carries the chat's session context (`` session `id` ·
+  commands, page)`. **Page 1 is the hand-picked favorites page** (user
+  request): the `⭐ 常用` / `⭐ Common` group alone holds `🤖 Agent`,
+  `🛑 Stop everything`, `📚 Pick project`, `🎨 Image card`, and nothing else —
+  no core row, no other group. **Page 2 onward** carries the full command
+  palette, still grouped by category with emoji headers (`🤖 Agent` /
+  `🧩 Session` / `🎨 Card` / `💬 Chat` / `⚙️ System`), and the core action row
+  (`⏹ Stop current turn` while running, `🔁 Retry last`, `📋 Copy last`)
+  follows that page's own content behind a rule. `PANEL_PAGE_SIZE = 12`
+  buttons per page after the first (`PANEL_FIRST_PAGE_SIZE = 4` caps the
+  favorites group), a quiet `note` page indicator (`Commands · page 1/3`),
+  and ◀️/▶️ nav hidden at the bounds. Each button stamps
+  `{kind:'command', name}` and executes the same handler as the slash line.
+  The status line carries the chat's session context (`` session `id` ·
   `cwd` ``). A category block is never split across pages; with the shipped
-  set the agent(1) + session(6) + card(1) + chat(1) groups fill page 1 and the
-  system group keeps page 2.
+  set the favorites group is page 1, agent(1) + session(6) + card(1) +
+  chat(1) are page 2, and the system group keeps page 3. The favorites list
+  itself lives in `Bridge.panelCommands` (`commonNames`), so a group that
+  outgrows the page fails loud instead of silently spilling.
 - **Input sub-view** (`📁 Change working directory`, `👥 Create group`,
   `🎯 Goal`, `💬 Feedback`, `✏️ Rename session`): a root-level `form` with
   one `input` and a `form_submit` button that carries a `name` (Feishu
@@ -1672,9 +1690,10 @@ accepts an absolute path as-is and only joins a relative one onto the pinned
 
 > On the terminal streaming card, a compact stats line shows the session's
 > cumulative turn/step/tool/token usage (exact fields only) plus a context
-> occupancy percentage, mirroring the DSH web `StatsLine`/context meter as a
-> path-level parity surface. No timing/throughput (TTFT/tok/s/duration) — the
-> host cannot see the web's `node.timing`; only exact counted fields.
+> occupancy percentage and the session's cost in CNY, mirroring the DSH web
+> `StatsLine`/context meter as a path-level parity surface. No timing/
+> throughput (TTFT/tok/s/duration) — the host cannot see the web's
+> `node.timing`; only exact counted fields.
 
 ### Intended behavior
 
@@ -1705,8 +1724,26 @@ turn — it is cumulative for the whole session, mirroring the web's whole-log
   across steps; absent usage contributes nothing).
 - `contextWindow` — the chat's current model `contextWindow` (from `ctx.llm`
   resolution) when known; `undefined` until resolved.
+- `costRmb` / `costModel` — the session's tokens priced in CNY as each step's
+  usage lands (`src/cards/pricing.ts`), against the chat's current model.
 
 `CardSnapshot`/the one render path (`syncCard`) carry it.
+
+**Session cost in CNY (user request).** dsh itself has no concept of money
+(`dsh-token-meter` reports context pressure, `dsh-session-stats` counts and
+wall times) and the off-the-shelf accounting plugin runs in the DESKTOP
+deployment's own process, whose ledger does not cover this surface, so the
+surface prices the tokens it already counts. `src/cards/pricing.ts` carries
+the DeepSeek CNY table with the official peak/off-peak pair and the
+weekend-all-off-peak rule, mirroring `dsh-cost-meter`'s `lib/pricing.js` so the
+figure reads like the desktop ledger for the same tokens. Each
+`assistant/message` step is priced at the instant it lands (the surface
+consumes events within milliseconds of the provider call, and the durable
+envelope carries no per-event timestamp to read instead); cache writes bill at
+the cache-hit rate; an unpriced model falls back to the flash tier. The amount
+renders as the trailing group `费用 ¥0.0123` — four decimals under one cent so
+a cheap turn never reads as `¥0`. The group is omitted when the session has no
+same-process usage to price (e.g. a durable-log replay after a restart).
 
 **Card/panel shape** — on the terminal card, after the content and alongside
 any `📎 Produced` chips, render a single line of `|`-separated groups
@@ -1717,6 +1754,7 @@ any `📎 Produced` chips, render a single line of `|`-separated groups
    plus `cache X%` when there is billed input.
 3. context occupancy — `context P%` when both `usedTokens` and `contextWindow`
    are known (rounded integer, upper-clamped at 100).
+4. session cost — `费用 ¥X.XX` when the session priced any step.
 
 Tool-call count is folded into the counts group in parentheses only when a
 tool ran (`M steps · T tools`). No timing group is ever shown.
@@ -1727,6 +1765,8 @@ tool ran (`M steps · T tools`). No timing group is ever shown.
   token group on a session whose steps all failed to bill).
 - `contextWindow` unknown (model resolution absent/failed): the context
   occupancy group is omitted (only the counts/tokens groups show).
+- No same-process token usage (a durable-log replay after a restart): the cost
+  group is omitted rather than rendering a `¥0.00` that never bills.
 - Chat with no pinned cwd: unaffected (this is a read-only card line, no
   sending, no path resolution).
 
@@ -1742,6 +1782,9 @@ tool ran (`M steps · T tools`). No timing group is ever shown.
 - [ ] No activity → no stats line (unit).
 - [ ] The stats line is terminal-only (not while working) and does not mutate
       card state (unit).
+- [ ] Each priced step adds its CNY amount and the terminal card renders the
+      `费用 ¥…` group; a session with no same-process usage omits it (unit +
+      pricing rules in `tests/cards/pricing.spec.ts`).
 
 ### Reference
 

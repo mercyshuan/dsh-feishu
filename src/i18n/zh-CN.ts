@@ -40,6 +40,7 @@ export const zhMessages: Record<MessageKey, string> = {
   'card.stats.tokens': '输入 {input} · 输出 {output}',
   'card.stats.cache': '缓存 {percent}% · {tokens}',
   'card.stats.context': '上下文 {percent}%',
+  'card.stats.cost': '费用 {amount}',
 
   // ── Repo picker ─────────────────────────────────────────────────────────
   'card.repo.title': '📚 选择项目',
@@ -209,6 +210,7 @@ export const zhMessages: Record<MessageKey, string> = {
   'panel.agentSettings.planUnavailable': '此部署不支持计划模式。',
   'panel.action.planModeUnavailable': '计划模式在此部署上不可用。',
   'panel.action.planModePickInvalid': '未选择计划模式状态。',
+  'panel.category.common': '⭐ 常用',
   'panel.category.agent': '🤖 智能体',
   'panel.category.session': '🧩 会话',
   'panel.category.card': '🎨 卡片',

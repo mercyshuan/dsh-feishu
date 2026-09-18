@@ -518,6 +518,24 @@ describe.skipIf(!integrationReady)('real-composition integration', () => {
         'utf8',
       );
 
+      // WHILE RUNNING the collapsed card streams the current thinking line
+      // (the fold stays live so the user sees progress without expanding).
+      await waitFor(
+        'the folded thinking line on the working card',
+        () =>
+          readOutbox()
+            .filter((r) => r.kind === 'patch')
+            .some((r) =>
+              r.card?.elements.some(
+                (el) =>
+                  el.tag === 'markdown' &&
+                  'content' in el &&
+                  el.content === '☁️ Let me check the files.',
+              ),
+            ),
+        90_000,
+      );
+
       // Turn completes: final card patch is green.
       await waitFor(
         'the green final card patch',
@@ -525,16 +543,17 @@ describe.skipIf(!integrationReady)('real-composition integration', () => {
         90_000,
       );
 
-      // The streaming card is the first card sent (message id mem-1).
-      // Collapsed by default → the folded line carries the current thinking.
+      // A FINISHED collapsed card hides the thinking/tool rows entirely (user
+      // request): no folded line and no row element until it is expanded.
       const patches = readOutbox().filter((r) => r.kind === 'patch');
       const finalCard = patches.at(-1)?.card;
+      expect(finalCard?.elements.some((el) => el.tag === 'column_set')).toBe(false);
       expect(
         finalCard?.elements.some(
           (el) =>
             el.tag === 'markdown' && 'content' in el && el.content === '☁️ Let me check the files.',
         ),
-      ).toBe(true);
+      ).toBe(false);
 
       // Expand → full rows visible (column_set row elements). The callback
       // carries the LIVE card's own message id (read from the rendered
@@ -608,7 +627,8 @@ describe.skipIf(!integrationReady)('real-composition integration', () => {
         false,
       );
 
-      // Collapse again → back to the folded thinking line (same live card id).
+      // Collapse again → the finished card is answer-only again (no rows): a
+      // folded FINISHED card hides thinking/tool rows (user request).
       writeAction({
         messageId: streamingCardMessageId(),
         chatId,
@@ -621,12 +641,9 @@ describe.skipIf(!integrationReady)('real-composition integration', () => {
           const all = readOutbox().filter((r) => r.kind === 'patch');
           const last = all.at(-1)?.card;
           return (
-            last?.elements.some(
-              (el) =>
-                el.tag === 'markdown' &&
-                'content' in el &&
-                el.content === '☁️ Let me check the files.',
-            ) === true
+            last !== undefined &&
+            last.elements.some((el) => el.tag === 'column_set') === false &&
+            JSON.stringify(last.elements).includes('Final UX answer.')
           );
         },
         30_000,
@@ -846,7 +863,8 @@ describe.skipIf(!integrationReady)('real-composition integration', () => {
       // driving the panel/stop actions — see the copy-after-stop test.
       await server.waitForHold();
 
-      // Panel while running carries ⏹ Stop current.
+      // Panel while running carries ⏹ Stop current on PAGE 2 (page 1 is the
+      // favorites palette).
       writeAction({
         messageId: 'mem-1',
         chatId,
@@ -854,10 +872,26 @@ describe.skipIf(!integrationReady)('real-composition integration', () => {
         value: { kind: 'panel' },
       });
       await waitFor(
-        'the running panel with Stop',
+        'the favorites panel page',
         () => {
           const panel = readOutbox()
             .filter((r) => r.kind === 'card')
+            .at(-1)?.card;
+          return JSON.stringify(panel?.elements ?? []).includes('🎨 Image card');
+        },
+        30_000,
+      );
+      writeAction({
+        messageId: 'mem-1',
+        chatId,
+        operatorOpenId: 'ou_mock',
+        value: { kind: 'panel-page', page: '1' },
+      });
+      await waitFor(
+        'the running panel with Stop',
+        () => {
+          const panel = readOutbox()
+            .filter((r) => r.kind === 'card' || r.kind === 'patch')
             .at(-1)?.card;
           const action = panel?.elements.find((el) => el.tag === 'action');
           return (
@@ -2567,9 +2601,24 @@ describe.skipIf(!integrationReady)('real-composition integration', () => {
       expect(
         page1?.elements.some(
           (el) =>
-            el.tag === 'note' && 'elements' in el && el.elements[0]?.content.includes('page 1/2'),
+            el.tag === 'note' && 'elements' in el && el.elements[0]?.content.includes('page 1/3'),
         ),
       ).toBe(true);
+      // Page 1 is the favorites palette (user request): the four common
+      // commands only.
+      const page1Labels =
+        page1?.elements.flatMap((el) =>
+          el.tag === 'action'
+            ? el.actions.filter((a) => a.tag === 'button').map((a) => a.text.content)
+            : [],
+        ) ?? [];
+      expect(page1Labels).toEqual([
+        '🤖 Agent',
+        '🛑 Stop everything',
+        '📚 Pick project',
+        '🎨 Image card',
+        'Next ▶️',
+      ]);
       writeAction({
         messageId: 'mem-2',
         chatId,
@@ -2587,7 +2636,7 @@ describe.skipIf(!integrationReady)('real-composition integration', () => {
                   (el) =>
                     el.tag === 'note' &&
                     'elements' in el &&
-                    el.elements[0]?.content.includes('page 2/2'),
+                    el.elements[0]?.content.includes('page 2/3'),
                 ) === true,
             ),
         30_000,
@@ -2602,13 +2651,45 @@ describe.skipIf(!integrationReady)('real-composition integration', () => {
             : [],
         ) ?? [];
       // The agent group is ONE button (the merged agent card — model,
-      // thinking depth, permission, agent preset, plan mode all live there);
-      // page 2 carries the system group.
+      // thinking depth, permission, agent preset, plan mode all live there).
       expect(labels).toContain('🤖 Agent');
-      expect(labels).toContain('📤 Export');
+      expect(labels).toContain('🗂️ Sessions');
       expect(labels).not.toContain('🤖 Model');
       expect(labels).not.toContain('🔐 Permission');
       expect(labels).not.toContain('🗺️ Plan mode');
+      // The system group (export among it) keeps the LAST page.
+      writeAction({
+        messageId: 'mem-2',
+        chatId,
+        operatorOpenId: 'ou_mock',
+        value: { kind: 'panel-page', page: '2' },
+      });
+      await waitFor(
+        'the page-3 panel card',
+        () =>
+          readOutbox()
+            .filter((r) => r.kind === 'card' || r.kind === 'patch')
+            .some(
+              (r) =>
+                r.card?.elements.some(
+                  (el) =>
+                    el.tag === 'note' &&
+                    'elements' in el &&
+                    el.elements[0]?.content.includes('page 3/3'),
+                ) === true,
+            ),
+        30_000,
+      );
+      const labels3 =
+        readOutbox()
+          .filter((r) => r.kind === 'card' || r.kind === 'patch')
+          .at(-1)
+          ?.card?.elements.flatMap((el) =>
+            el.tag === 'action'
+              ? el.actions.filter((a) => a.tag === 'button').map((a) => a.text.content)
+              : [],
+          ) ?? [];
+      expect(labels3).toContain('📤 Export');
     } catch (error) {
       throw new Error(
         `${String(error)}\n--- dsh stderr ---\n${stderr}\n--- dsh stdout ---\n${stdout}`,

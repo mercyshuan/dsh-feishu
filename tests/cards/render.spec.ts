@@ -286,7 +286,7 @@ describe('buildCard', () => {
     expect(rowButton(rows[1])?.value).toEqual({ kind: 'row-details', id: 'c1' });
   });
 
-  it('collapsed mode renders the current thinking with an expand toggle', () => {
+  it('collapsed FINISHED card hides thinking and tool rows behind the expand toggle', () => {
     const card = buildCard({
       title: 'T',
       content: 'done',
@@ -314,6 +314,27 @@ describe('buildCard', () => {
       collapsed: true,
       status: 'done',
     });
+    // No thinking line and no row at all while folded — the answer plus the
+    // stats/button area are the card (user request).
+    const thought = card.elements.find(
+      (el): el is Extract<CardElement, { tag: 'markdown' }> =>
+        el.tag === 'markdown' && el.content.startsWith('☁️ '),
+    );
+    expect(thought).toBeUndefined();
+    expect(card.elements.filter((el) => el.tag === 'column_set')).toHaveLength(0);
+    const actions = card.elements.filter((el) => el.tag === 'action');
+    // ONE row: the panel action, then the expand toggle (user request).
+    expect(buttonLabels(actions[0])).toEqual(['⚙️ Panel', '▸ Expand']);
+  });
+
+  it('collapsed WORKING card still streams the current thinking line', () => {
+    const card = buildCard({
+      title: 'T',
+      content: '',
+      rows: [{ kind: 'think', id: 't1', text: 'weighing the options', settled: false }],
+      collapsed: true,
+      status: 'working',
+    });
     const thought = card.elements.find(
       (el): el is Extract<CardElement, { tag: 'markdown' }> =>
         el.tag === 'markdown' && el.content.startsWith('☁️ '),
@@ -321,10 +342,10 @@ describe('buildCard', () => {
     expect(thought?.content).toBe('☁️ weighing the options');
     expect(card.elements.filter((el) => el.tag === 'column_set')).toHaveLength(0);
     const actions = card.elements.filter((el) => el.tag === 'action');
-    expect(buttonLabels(actions[1])).toContain('▸ Expand');
+    expect(buttonLabels(actions[0])).toEqual(['⏹ Stop turn', '▸ Expand']);
   });
 
-  it('expanded mode shows the collapse toggle when rows exist', () => {
+  it('expanded card keeps one row: the panel action then the collapse toggle', () => {
     const card = buildCard({
       title: 'T',
       content: 'done',
@@ -342,7 +363,9 @@ describe('buildCard', () => {
       status: 'done',
     });
     const actions = card.elements.filter((el) => el.tag === 'action');
-    expect(buttonLabels(actions[1])).toContain('▾ Collapse');
+    expect(actions).toHaveLength(1);
+    expect(buttonLabels(actions[0])).toEqual(['⚙️ Panel', '▾ Collapse']);
+    expect(card.elements.filter((el) => el.tag === 'column_set')).toHaveLength(1);
   });
 
   it('renders the complete output at the bottom as markdown', () => {
@@ -361,7 +384,7 @@ describe('buildCard', () => {
     expect(joined).not.toContain('# Hello');
   });
 
-  it('shows copy/retry/panel plus the rows toggle when done', () => {
+  it('shows panel plus the rows toggle when done (no copy/retry buttons)', () => {
     const card = buildCard({
       title: 'T',
       content: 'done',
@@ -379,8 +402,9 @@ describe('buildCard', () => {
       status: 'done',
     });
     const actions = card.elements.filter((el) => el.tag === 'action');
-    expect(buttonLabels(actions[0])).toEqual(['📋 Copy', '🔁 Retry', '⚙️ Panel']);
-    expect(buttonLabels(actions[1])).toEqual(['▾ Collapse']);
+    expect(buttonLabels(actions[0])).toEqual(['⚙️ Panel', '▾ Collapse']);
+    expect(buttonLabels(actions[0])).not.toContain('📋 Copy');
+    expect(buttonLabels(actions[0])).not.toContain('🔁 Retry');
   });
 });
 
@@ -522,24 +546,40 @@ describe('buildRowDetailsCard', () => {
 });
 
 describe('buildPanelCard', () => {
-  it('emits a control card with operation buttons', () => {
+  it('emits a control card with the favorites palette on page 1', () => {
     const card = buildPanelCard('**Idle** — send a message.', false);
     expect(card.header?.title.content).toBe('⚙️ dsh-feishu panel');
+    // No commands → no palette, and the core action row lives from page 2 on:
+    // page 1 stays the status line only.
     const action = card.elements.find((el) => el.tag === 'action');
-    expect(action && 'actions' in action ? action.actions.length : 0).toBe(2);
+    expect(action).toBeUndefined();
   });
 
-  it('includes the Stop button only while a turn is running', () => {
-    const running = buildPanelCard('**Running**', true);
-    const idle = buildPanelCard('**Idle**', false);
-    const labelsOf = (card: ReturnType<typeof buildPanelCard>): string[] => {
+  it('shows the core action row on page 2 only (Stop while running)', () => {
+    // A favorites group takes page 1, so the rest lands on page 2.
+    const palette: PanelCommand[] = [
+      { name: 'agent', buttonLabel: 'A', category: 'common' },
+      { name: 'x', buttonLabel: 'X', category: 'system' },
+    ];
+    const labelsOf = (card: ReturnType<typeof buildPanelCard>): readonly string[] => {
       const action = card.elements.find((el) => el.tag === 'action');
       return action && 'actions' in action
         ? action.actions.filter((a) => a.tag === 'button').map((a) => a.text.content)
         : [];
     };
-    expect(labelsOf(running)).toEqual(['⏹ Stop current turn', '🔁 Retry last', '📋 Copy last']);
-    expect(labelsOf(idle)).toEqual(['🔁 Retry last', '📋 Copy last']);
+    // Page 1 = favorites only → the core row is NOT there.
+    expect(labelsOf(buildPanelCard('**Running**', true, palette, 0))).toEqual(['A']);
+    expect(labelsOf(buildPanelCard('**Idle**', false, palette, 0))).toEqual(['A']);
+    // Page 2 carries it: Stop while running, Retry/Copy always.
+    expect(labelsOf(buildPanelCard('**Running**', true, palette, 1))).toEqual([
+      '⏹ Stop current turn',
+      '🔁 Retry last',
+      '📋 Copy last',
+    ]);
+    expect(labelsOf(buildPanelCard('**Idle**', false, palette, 1))).toEqual([
+      '🔁 Retry last',
+      '📋 Copy last',
+    ]);
   });
 });
 
@@ -748,6 +788,24 @@ describe('panelPages', () => {
     expect(headers(pages[1] ?? [])).toEqual(['system']);
     expect(names(pages[1] ?? [])).toHaveLength(9);
   });
+  it('puts the favorites group alone on page 1 and packs the rest after it', () => {
+    const pages = panelPages([
+      { name: 'agent', buttonLabel: 'A', category: 'common' },
+      { name: 'stop', buttonLabel: 'B', category: 'common' },
+      { name: 'repo', buttonLabel: 'C', category: 'common' },
+      { name: 'imagecard', buttonLabel: 'D', category: 'common' },
+      { name: 'sessions', buttonLabel: 'E', category: 'session' },
+      { name: 'help', buttonLabel: 'F', category: 'system' },
+    ]);
+    const headers = (page: readonly PanelPageEntry[]): string[] =>
+      page.filter((e) => e.type === 'header').map((e) => (e.type === 'header' ? e.label : ''));
+    const names = (page: readonly PanelPageEntry[]): string[] =>
+      page.filter((e) => e.type === 'button').map((e) => (e.type === 'button' ? e.name : ''));
+    expect(headers(pages[0] ?? [])).toEqual(['common']);
+    expect(names(pages[0] ?? [])).toEqual(['agent', 'stop', 'repo', 'imagecard']);
+    expect(headers(pages[1] ?? [])).toEqual(['session', 'system']);
+    expect(names(pages[1] ?? [])).toEqual(['sessions', 'help']);
+  });
 });
 
 /** A fully-populated merged agent view (every section has a real control). */
@@ -887,20 +945,20 @@ describe('buildAgentSettingsCard', () => {
 });
 
 describe('buildPanelCard palette', () => {
-  it('keeps the core buttons first, then the palette page grouped by category', () => {
+  it('renders each category as its own block on the page', () => {
     const card = buildPanelCard('**Idle**', false, paletteCommands, 0);
     const actions = card.elements.filter(
       (el): el is Extract<CardElement, { tag: 'action' }> => el.tag === 'action',
     );
-    expect(buttonLabels(actions[0])).toEqual(['🔁 Retry last', '📋 Copy last']);
-    // Each category is its own block: header line, then THAT category's
-    // button row (user report: headers stacked with nothing between them).
-    const sessionRow = buttonLabels(actions[1]);
+    // Page 1 of this fixture (no favorites group): the session + chat blocks,
+    // then the page-nav row (the core Retry/Copy row lives from page 2 on).
+    const sessionRow = buttonLabels(actions[0]);
     expect(sessionRow).toHaveLength(7);
     expect(sessionRow[0]).toBe('⏹ Stop');
     expect(sessionRow).not.toContain('👥 New group');
-    const chatRow = buttonLabels(actions[2]);
+    const chatRow = buttonLabels(actions[1]);
     expect(chatRow).toEqual(['👥 New group']);
+    expect(buttonLabels(actions[2])).toEqual(['Next ▶️']);
     // Category headers render as emoji-tagged markdown lines, each BEFORE
     // its own button row (interleaved, not stacked).
     const markdowns = card.elements.filter(
@@ -910,8 +968,8 @@ describe('buildPanelCard palette', () => {
     const chatHeader = markdowns.findIndex((m) => m.content === '**💬 Chat**');
     expect(sessionHeader).toBeGreaterThanOrEqual(0);
     expect(chatHeader).toBeGreaterThan(sessionHeader);
-    const sessionRowIndex = card.elements.indexOf(actions[1] as CardElement);
-    const chatRowIndex = card.elements.indexOf(actions[2] as CardElement);
+    const sessionRowIndex = card.elements.indexOf(actions[0] as CardElement);
+    const chatRowIndex = card.elements.indexOf(actions[1] as CardElement);
     expect(sessionHeader).toBeLessThan(sessionRowIndex);
     expect(chatHeader).toBeLessThan(chatRowIndex);
     // The page indicator is a quiet note, not a bold line.
@@ -919,6 +977,35 @@ describe('buildPanelCard palette', () => {
       (el): el is Extract<CardElement, { tag: 'note' }> => el.tag === 'note',
     );
     expect(notes.some((n) => n.elements[0]?.content.includes('page 1/2'))).toBe(true);
+  });
+
+  it('puts the favorites group alone on page 1 with no core action row', () => {
+    const favorites: PanelCommand[] = [
+      { name: 'agent', buttonLabel: '🤖 Agent', category: 'common' },
+      { name: 'stop', buttonLabel: '🛑 Stop everything', category: 'common' },
+      { name: 'repo', buttonLabel: '📚 Pick project', category: 'common' },
+      { name: 'imagecard', buttonLabel: '🎨 Image card', category: 'common' },
+      { name: 'sessions', buttonLabel: '🗂️ Sessions', category: 'session' },
+      { name: 'help', buttonLabel: '❓ Help', category: 'system' },
+    ];
+    const page1 = buildPanelCard('**Idle**', false, favorites, 0);
+    const page1Actions = page1.elements.filter((el) => el.tag === 'action');
+    expect(buttonLabels(page1Actions[0])).toEqual([
+      '🤖 Agent',
+      '🛑 Stop everything',
+      '📚 Pick project',
+      '🎨 Image card',
+    ]);
+    // ONLY the favorites: no Retry/Copy core row anywhere on page 1.
+    expect(JSON.stringify(page1.elements)).not.toContain('Retry last');
+    expect(page1.elements.some((el) => el.tag === 'hr')).toBe(false);
+    // Page 2: the remaining groups' buttons, then the core row.
+    const page2 = buildPanelCard('**Idle**', false, favorites, 1);
+    const page2Actions = page2.elements.filter((el) => el.tag === 'action');
+    expect(buttonLabels(page2Actions[0])).toEqual(['🔁 Retry last', '📋 Copy last']);
+    expect(buttonLabels(page2Actions[1])).toEqual(['🗂️ Sessions']);
+    expect(buttonLabels(page2Actions[2])).toEqual(['❓ Help']);
+    expect(JSON.stringify(page2.elements)).not.toContain('🎨 Image card');
   });
 
   it('stamps command payloads on palette buttons', () => {
@@ -936,16 +1023,21 @@ describe('buildPanelCard palette', () => {
   });
 
   it('hides Stop unless running', () => {
-    const idle = buildPanelCard('**Idle**', false, [], 0);
-    const idleCore = idle.elements.find((el) => el.tag === 'action');
-    expect(buttonLabels(idleCore)).toEqual(['🔁 Retry last', '📋 Copy last']);
-    const running = buildPanelCard('**Running**', true, [], 0);
-    const runningCore = running.elements.find((el) => el.tag === 'action');
-    expect(buttonLabels(runningCore)).toEqual([
-      '⏹ Stop current turn',
-      '🔁 Retry last',
-      '📋 Copy last',
-    ]);
+    // A favorites group takes page 1, so the core row sits on page 2.
+    const palette: PanelCommand[] = [
+      { name: 'agent', buttonLabel: '🤖 Agent', category: 'common' },
+      ...paletteCommands,
+    ];
+    const coreOf = (card: ReturnType<typeof buildPanelCard>): readonly string[] => {
+      const action = card.elements.find((el) => el.tag === 'action');
+      return action && 'actions' in action
+        ? action.actions.filter((a) => a.tag === 'button').map((a) => a.text.content)
+        : [];
+    };
+    const idle = buildPanelCard('**Idle**', false, palette, 1);
+    expect(coreOf(idle)).toEqual(['🔁 Retry last', '📋 Copy last']);
+    const running = buildPanelCard('**Running**', true, palette, 1);
+    expect(coreOf(running)).toEqual(['⏹ Stop current turn', '🔁 Retry last', '📋 Copy last']);
   });
 
   it('renders no palette section when there are no commands', () => {

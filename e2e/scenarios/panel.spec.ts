@@ -1,12 +1,12 @@
 /**
  * E2E scenario: `/panel` opens the control-panel card and its buttons work.
  *
- * The `/panel` handler (src/commands/surface.ts → `openPanel`) renders a
- * card with every surface command as a button (grouped by category). This
- * scenario asserts the panel card appears (with a command button) and then
- * CLICKS one of its buttons (`Stop turn`) to verify the panel button resolves
- * to the surface's stop-turn command — a real card-button round-trip, no LLM
- * in the loop.
+ * The `/panel` handler (src/commands/surface.ts → `openPanel`) renders the
+ * FAVORITES page (agent / stop-everything / pick-project / image card) with the
+ * full palette on the following pages. This scenario asserts the panel card
+ * appears (with the favorites buttons) and then CLICKS one of them
+ * (`Stop everything`) to verify the panel button resolves to the surface's stop
+ * command — a real card-button round-trip, no LLM in the loop.
  *
  * @module e2e/scenarios/panel
  */
@@ -35,20 +35,20 @@ test('send /panel → control panel card with working buttons', async ({ page },
     debug('assert', 'panel card received');
     await snapshot(page, cfg, `${caseId}-panel`, caseId);
 
-    // Click a Session-group button on the FIRST page — `Stop turn` (emoji in
+    // Click a favorites button on the FIRST page — `Stop everything` (emoji in
     // the label is cosmetic; match the accessible name without it), whose
     // handler with no active session returns the deterministic local text
     // `no active session to stop.` (no LLM). This proves the panel button
-    // resolves to a surface command. (`📊 Status` sits on page 2, so we use
-    // a first-page button instead of paging.)
-    await clickCardButton(page, 'Stop turn');
+    // resolves to a surface command. (`📊 Status` sits on a later page, so we
+    // use a first-page button instead of paging.)
+    await clickCardButton(page, 'Stop everything');
     await waitForBotReplyContaining(page, 'no active session to stop.', cfg.timeoutMs);
-    debug('assert', 'panel button -> stop-turn reply received');
+    debug('assert', 'panel button -> stop-everything reply received');
     await snapshot(page, cfg, `${caseId}-button-reply`, caseId);
 
     testInfo.annotations.push({
       type: 'evidence',
-      description: `group: ${groupName} | panel rendered + its "Stop turn" button resolved to the stop-turn command`,
+      description: `group: ${groupName} | panel rendered + its "Stop everything" button resolved to the stop command`,
     });
   } finally {
     await disbandGroup(cfg, groupName, chatId, debug);

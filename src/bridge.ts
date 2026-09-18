@@ -41,6 +41,7 @@ import {
   buildQueueItemCard,
   buildResultCard,
   type ModelOptionView,
+  PANEL_COMMON_CATEGORY,
   type PanelCommand,
   type QueueItemStatus,
 } from './cards/render.js';
@@ -915,6 +916,7 @@ export class Bridge {
       resolveAgent: (chatId, sessionId, cwd) => this.resolveAgent(chatId, sessionId, cwd),
       resolveContextWindow: (chatId, sessionId, cwd) =>
         this.resolveContextWindow(chatId, sessionId, cwd),
+      resolveModelId: (chatId) => this.currentModelTarget(chatId)?.model,
       textMentionFor: (chatId) => this.textMentionFor(chatId),
       sendLogFile: (chatId) => this.sendLogFile(chatId).then(() => {}),
     };
@@ -1558,11 +1560,14 @@ export class Bridge {
   }
 
   /** The panel command palette: every surface command as a button, grouped
-   *  by category (agent → session → card → chat → system) so the palette reads
-   *  as sections regardless of registration order, and the groups that choose
-   *  HOW the session runs — plus the skill-control card button — land on the
-   *  first page. */
+   *  by category so the palette reads as sections regardless of registration
+   *  order. The `common` group (favorites) is hand-picked and leads the list
+   *  because it takes the whole FIRST page; every other group follows from
+   *  page 2 (agent → session → card → chat → system). */
   private panelCommands(): PanelCommand[] {
+    // The favorites page, in the requested order: agent settings, the
+    // everything-stopper, the project picker, and the image card.
+    const commonNames = ['agent', 'stop', 'repo', 'imagecard'];
     const categoryOrder = ['agent', 'session', 'card', 'chat', 'system'];
     // An unknown category sorts LAST (not first): `indexOf` returns -1, which
     // would otherwise float a new/foreign group to the top of the palette.
@@ -1570,14 +1575,29 @@ export class Bridge {
       const index = categoryOrder.indexOf(category);
       return index === -1 ? categoryOrder.length : index;
     };
-    return [...this.commands.list()]
-      .filter((command) => command.hiddenFromPanel !== true)
+    const commands = [...this.commands.list()].filter(
+      (command) => command.hiddenFromPanel !== true,
+    );
+    const byName = new Map(commands.map((command) => [command.name, command]));
+    const common: PanelCommand[] = [];
+    for (const name of commonNames) {
+      const command = byName.get(name);
+      if (command === undefined) continue;
+      byName.delete(name);
+      common.push({
+        name: command.name,
+        buttonLabel: command.buttonLabel ?? command.name,
+        category: PANEL_COMMON_CATEGORY,
+      });
+    }
+    const rest = [...byName.values()]
       .sort((a, b) => rank(a.category) - rank(b.category))
       .map((command) => ({
         name: command.name,
         buttonLabel: command.buttonLabel ?? command.name,
         category: command.category,
       }));
+    return [...common, ...rest];
   }
 
   /** Open (or page) the control panel: a fresh card + reset stack. */

@@ -40,6 +40,7 @@ export const enMessages = {
   'card.stats.tokens': 'input {input} · output {output}',
   'card.stats.cache': 'cache {percent}% · {tokens}',
   'card.stats.context': 'context {percent}%',
+  'card.stats.cost': 'cost {amount}',
 
   // ── Repo picker ─────────────────────────────────────────────────────────
   'card.repo.title': '📚 Pick a project',
@@ -222,6 +223,7 @@ export const enMessages = {
   'panel.agentSettings.planUnavailable': 'Plan mode is unavailable on this deployment.',
   'panel.action.planModeUnavailable': 'Plan mode is unavailable on this deployment.',
   'panel.action.planModePickInvalid': 'No plan-mode state was chosen.',
+  'panel.category.common': '⭐ Common',
   'panel.category.agent': '🤖 Agent',
   'panel.category.session': '🧩 Session',
   'panel.category.card': '🎨 Card',

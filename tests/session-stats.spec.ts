@@ -18,6 +18,7 @@ import {
 } from '../src/cards/StreamingCardController.js';
 import { StreamingCardManager } from '../src/cards/streaming.js';
 import type { CardAction, CardJson, FeishuTransport } from '../src/feishu/types.js';
+import { t } from '../src/i18n/index.js';
 import { SessionMap } from '../src/session-map.js';
 
 class RecordingTransport implements FeishuTransport {
@@ -92,6 +93,8 @@ function makeController(cwd: string): {
     };
     contextWindow: number | undefined;
     currentContextTokens: number | undefined;
+    costRmb: number;
+    costModel: string | undefined;
   };
 } {
   const transport = new RecordingTransport();
@@ -113,6 +116,7 @@ function makeController(cwd: string): {
     reactions: undefined,
     resolveAgent: async () => undefined,
     resolveContextWindow: async () => 128_000,
+    resolveModelId: () => 'deepseek-v4-flash',
     textMentionFor: () => '',
   } as unknown as StreamingCardHost;
   const controller = new StreamingCardController(host);
@@ -131,6 +135,8 @@ function makeController(cwd: string): {
           };
           contextWindow: number | undefined;
           currentContextTokens: number | undefined;
+          costRmb: number;
+          costModel: string | undefined;
         };
       }
     ).sessionStatsFor(chatId);
@@ -331,5 +337,27 @@ describe('StreamingCardController session stats accumulation', () => {
       operatorOpenId: 'u1',
       value: { kind: 'copy' },
     } as CardAction);
+  });
+
+  it('prices the session tokens in CNY and renders the amount on the card', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'stats-'));
+    const { controller, transport, statsFor } = makeController(dir);
+    await controller.beginTurn('oc_chat', 'om-1', 't');
+    await controller.handleEvent('s1', turnStartEvent(1));
+    // 1M miss + 1M output on flash: 1.5 + 4.5 = ¥6.00 at the off-peak tier
+    // (a peak window would double it; either way the card carries the amount).
+    await controller.handleEvent(
+      's1',
+      assistantMessageEvent({
+        inputTokens: 1_000_000,
+        outputTokens: 1_000_000,
+      } as unknown),
+    );
+    const cost = statsFor('oc_chat').costRmb;
+    expect(cost).toBeGreaterThan(0);
+    await controller.handleEvent('s1', turnEndEvent('completed'));
+    const terminalJson = JSON.stringify(transport.updatedCards.at(-1));
+    // Locale-proof: the group's label as the active catalog renders it.
+    expect(terminalJson).toContain(t('card.stats.cost', { amount: '' }).replace(' ', ''));
   });
 });

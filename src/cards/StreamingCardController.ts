@@ -20,6 +20,7 @@ import type { CardAction, FeishuTransport } from '../feishu/types.js';
 import { t } from '../i18n/index.js';
 import { isImagePath } from '../outbound.js';
 import type { SessionMap } from '../session-map.js';
+import { rmbCostForUsage, type UsageBuckets } from './pricing.js';
 import {
   assistantText,
   buildCard,
@@ -84,14 +85,25 @@ function emptySessionStats(): SessionStatsView {
     },
     contextWindow: undefined,
     currentContextTokens: undefined,
+    costRmb: 0,
+    costModel: undefined,
   };
 }
 
 /** Sum one assistant step's `TokenUsage` (absent fields add nothing) into the
  *  session accumulator. `usage` is the `assistant/message` event's optional
- *  `usage` field, absent when the adapter reported none. */
-function accumulateTokenUsage(stats: SessionStatsView, usage: unknown): void {
-  if (typeof usage !== 'object' || usage === null) return;
+ *  `usage` field, absent when the adapter reported none.
+ *  @returns the step's own four buckets (all zero when nothing was reported),
+ *    so the caller can price exactly the tokens this step added.
+ */
+function accumulateTokenUsage(stats: SessionStatsView, usage: unknown): UsageBuckets {
+  const zero: UsageBuckets = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+  };
+  if (typeof usage !== 'object' || usage === null) return zero;
   const u = usage as {
     inputTokens?: unknown;
     outputTokens?: unknown;
@@ -100,16 +112,23 @@ function accumulateTokenUsage(stats: SessionStatsView, usage: unknown): void {
   };
   const num = (v: unknown): number =>
     typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0;
-  stats.tokenUsage.inputTokens += num(u.inputTokens);
-  stats.tokenUsage.outputTokens += num(u.outputTokens);
-  stats.tokenUsage.cacheReadTokens += num(u.cacheReadTokens);
-  stats.tokenUsage.cacheWriteTokens += num(u.cacheWriteTokens);
+  const step: UsageBuckets = {
+    inputTokens: num(u.inputTokens),
+    outputTokens: num(u.outputTokens),
+    cacheReadTokens: num(u.cacheReadTokens),
+    cacheWriteTokens: num(u.cacheWriteTokens),
+  };
+  stats.tokenUsage.inputTokens += step.inputTokens;
+  stats.tokenUsage.outputTokens += step.outputTokens;
+  stats.tokenUsage.cacheReadTokens += step.cacheReadTokens;
+  stats.tokenUsage.cacheWriteTokens += step.cacheWriteTokens;
   // Track the CURRENT context size (the latest request's full input) for the
   // context-occupancy group. `inputTokens` + `cacheReadTokens` is the context
   // THAT request carried (un-cached + cached prefix), unlike the cumulative
   // sum above.
-  const context = num(u.inputTokens) + num(u.cacheReadTokens);
+  const context = step.inputTokens + step.cacheReadTokens;
   if (context > 0) stats.currentContextTokens = context;
+  return step;
 }
 
 /**
@@ -203,6 +222,13 @@ export interface SessionStatsView {
    *  tokenUsage sum here would over-count (each request re-sends the growing
    *  context) and drive the percentage to 100% after a few messages. */
   currentContextTokens: number | undefined;
+  /** This session's tokens priced in CNY (`cards/pricing.ts`), accumulated as
+   *  each step's usage lands. 0 until the first billed step. */
+  costRmb: number;
+  /** The model id the accumulated cost was priced against (the chat's
+   *  selection when the last step billed; a mid-session model switch prices
+   *  the FOLLOWING steps under the new id — logged for diagnosis). */
+  costModel: string | undefined;
 }
 
 const MAX_TITLE_CHARS = 40;
@@ -288,6 +314,10 @@ export interface StreamingCardHost {
     sessionId: string,
     cwd: string,
   ): Promise<number | undefined>;
+  /** Best-effort model id the chat currently bills to (no `provider/` prefix),
+   *  used to price token usage in CNY for the stats line. Absent → the shipped
+   *  default DeepSeek tier prices the usage. */
+  resolveModelId?(chatId: string): string | undefined;
   /** Proactive @-mention prefix for a chat in groups (failure notices). */
   textMentionFor(chatId: string): string;
   /** Read the dsh-feishu log and ship it to the chat (error-card "Export log"). */
@@ -840,7 +870,20 @@ export class StreamingCardController {
         state.content = assistantText(event.data.message.content);
         const stats = this.sessionStatsFor(chatId);
         stats.stepCount += 1;
-        accumulateTokenUsage(stats, event.data.usage);
+        const stepUsage = accumulateTokenUsage(stats, event.data.usage);
+        // Price this step in CNY against the chat's CURRENT model. The billing
+        // instant is now: the surface consumes events within milliseconds of
+        // the provider call, so a step is priced in the tier it ran in (the
+        // durable envelope carries no per-event timestamp to read instead).
+        const costModel = this.host.resolveModelId?.(chatId);
+        const stepCost = rmbCostForUsage(stepUsage, costModel, Date.now());
+        if (stepCost > 0) {
+          stats.costRmb += stepCost;
+          stats.costModel = costModel;
+          this.host.logger.debug(
+            `streaming cost ${chatId}: step ¥${stepCost.toFixed(4)} (model ${costModel ?? 'default'}, total ¥${stats.costRmb.toFixed(4)})`,
+          );
+        }
         this.syncCard(chatId);
         break;
       }

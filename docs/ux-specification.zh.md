@@ -19,12 +19,20 @@
    - **工具行（Tool row）**：`<status> <Title> · <summary>`，其中 status 为 `🔧`（运行中）、`✅`（完成）、`❌`（出错）；Title 与 summary 来自第 2 节。
 2. **完整答案** —— 回合的最终输出，按 markdown 渲染（第 4 节），位于底部。
 3. **执行状态** —— 工作中显示 markdown 行 `**… working**` / `**⏹ Stopping…**`（可见进度）；终态时显示安静的 `note`（`✅ Done` / `⏹ Stopped` / `⚠️ Turn ended with an error`）—— 头部模板颜色已承载语义（见 1.4）。
-4. **按钮区** —— 两行（第 3.1 节）：先是状态操作，再是行视图切换。
+4. **按钮区** —— 一行（第 3.1 节）：状态操作，紧随其后是行视图切换。
 
-卡片**默认折叠**：行序列被替换为一行**当前思考内容** —— 最新一条非空推理块
-压成单行、只保留尾部（超过 `MAX_COLLAPSED_THINK_CHARS` 时前缀 `…`）；当该回合
-没有任何推理文本时（模型不输出思考，或直接开始调工具），回退为最新一行的行文本，
-折叠态绝不会空白。按钮区增加 `▸ Expand`。
+卡片**默认折叠**，折叠在回合运行中与结束后含义不同：
+
+- **运行中（working）**：行序列被替换为一行**当前思考内容** —— 最新一条非空推理块
+  压成单行、只保留尾部（超过 `MAX_COLLAPSED_THINK_CHARS` 时前缀 `…`）；当该回合
+  没有任何推理文本时（模型不输出思考，或直接开始调工具），回退为最新一行的行文本，
+  折叠态绝不会空白。按钮区带 `▸ Expand`。
+- **已结束（done / stopped / error）**：思考行与工具行**完全隐藏** —— 折叠态的已结束
+  卡片就是答案加统计行，整个过程在 `▸ Expand` 之后一触可达（用户需求）；展开后渲染
+  完整的时间顺序行序列。
+
+> 取代了此前的行名序列 `think → bash → read → …`（用户反馈）：一列工具名只说
+> 明跑过哪些工具，不说明模型在想什么。
 
 > 取代了此前的行名序列 `think → bash → read → …`（用户反馈）：一列工具名只说
 > 明跑过哪些工具，不说明模型在想什么。
@@ -47,7 +55,7 @@ done|stopped|error --any action--->  same (state unchanged; card re-synced)
 - **流式输出**：会话事件变更 working 状态并调用 `syncCard`（经由 streaming manager）。
 - **turn/end**：`completed` → done，`aborted`（用户 Stop）→ **stopped**，`error` → error。被中止的回合必须显示 **Stopped**，绝不能是 Done（DSH web `message.stopped`；用户报告）。`finalize` 冲刷终态渲染。状态保留在 map 中（rows/content 为 ⋯ 按钮和后续重新同步而保留）。
 - **卡片操作** 变更状态（toggle 翻转 `collapsed`）或不变更，然后**总是**调用 `syncCard` —— 唯一的渲染路径。已完成卡片被原地重新 patch，通过 macrotask 延迟，使回调 ACK 先到达（botmux 规则：否则 Lark 可能恢复点击前的卡片 —— 这是"reverts to working"类 bug 的根源）。
-- **折叠**：`collapsed` 是状态的一部分；`▸ Expand`/`▾ Collapse` 翻转它。折叠期间思考行持续流式更新（每次同步时根据 rows 重新计算最新推理文本）。新回合重置为折叠。
+- **折叠**：`collapsed` 是状态的一部分；`▸ Expand`/`▾ Collapse` 翻转它。回合**运行中**折叠时思考行持续流式更新（每次同步时根据 rows 重新计算最新推理文本）；**已结束**的折叠卡片不渲染任何行（用户需求）。新回合重置为折叠。
 - **compaction 不是回合**（用户报告）：`/compact` 运行
   `compaction/start → summary → end` 事务，**没有** `turn/end`，因此
   流式卡片控制器掌管 compaction 卡的生命周期——`compaction/start` 立即打开
@@ -125,13 +133,14 @@ done|stopped|error --any action--->  same (state unchanged; card re-synced)
 
 ### 3.1 状态按钮区（流式卡片底部）
 
-两行操作按钮，让每一行在移动端保持简短：
+一行操作按钮：状态操作在前，视图切换紧随其后（用户需求 —— 切换按钮此前独占
+第二行）：
 
-- **第 1 行 —— 状态操作**
-  - **working**：`⏹ Stop turn`。
-  - **done**：`📋 Copy`、`🔁 Retry`、`⚙️ Panel`。
-  - **error**：`🔁 Retry`、`⚙️ Panel`。
-- **第 2 行 —— 视图切换**（仅当存在行时）：`▾ Collapse` / `▸ Expand`。
+- **working**：`⏹ Stop turn`，存在行时再跟 `▸ Expand` / `▾ Collapse`。
+- **done / stopped / error**：`⚙️ Panel`，存在行时再跟 `▸ Expand` / `▾ Collapse`。
+
+`📋 Copy` 与 `🔁 Retry` 不再是卡片按钮（用户需求）：答案可就地选中，重试保留在
+面板第 2 页（`🔁 Retry last`）与打字操作上。
 
 ### 3.2 行 ⋯ 按钮
 
@@ -144,7 +153,7 @@ done|stopped|error --any action--->  same (state unchanged; card re-synced)
 | `stop` | `agent.cancel({kind:'user'}, {keepInbox:true})`（即 DSH web 的 Stop）+ `⏹ Stopping…` 文本。没有存活 agent → 显示解释性文本。 |
 | `copy` | 将最后一条输出作为文本重新发送 |
 | `retry` | 在新的回合/卡片上重新投递最后一条 prompt |
-| `panel` | 打开面板卡片（stop/retry/copy） |
+| `panel` | 打开面板卡片（第 1 页为常用：智能体 / 全部停止 / 选择项目 / 生图卡片；第 2 页起为完整调色板加 stop-retry-copy 核心行） |
 | `toggle-rows` | 翻转折叠位；重新渲染（延迟 patch） |
 | `row-details` | 打开该行的详情卡片；重新断言流式卡片 |
 | `repo-pick` / `repo-page` | repo 选择器（第 6 节） |
@@ -271,7 +280,7 @@ harness 的裸 `/plan` 和 `/permission` 形式无法*选择*或*切换*：不�
 
 面板是一个**状态机**，而不是无状态重发 —— 而且权威视图栈是**每张卡一份，而不是每聊天一份**：`PanelController` 维护 `Map<chatId, Map<messageId, PanelView[]>>`（菜单根在栈底），只有一条渲染路径（`renderPanelView`）。每张面板卡拥有自己的栈，因此某张卡上的按钮 PUSH / POP / REPLACE **那张卡**的栈，并**原地**渲染那张卡 —— 点旧卡就更新旧卡，绝不会更新别的卡（用户报告："点这张卡，另一张卡响应"）。守护进程重启前留在屏幕上的卡，第一次被点击时从菜单根开始。按钮 PUSH 子视图（`input` 表单、`confirm`、`sessions`、`session-detail`、`picker`）；Back POPS；完成/拒绝回到菜单根（重命名后回到详情）。每次转换都在同一张卡片上原地更新（patch）；更新失败时重发卡片并记录新 id。`/panel` 与打开视图的斜杠命令（`openPanel` / `openPanelView`）会发布**全新**卡片并重置栈 —— 之前的面板卡继续留在屏幕上独立可用，聊天永远不会"一张换另一张"。斜杠命令行更新该聊天**最近发布**的面板卡（`latestPanelCardId`）；卡片回调永远更新**自己那张**卡。异步数据视图（`sessions`、`session-detail`、`picker`）会先发布**⏳ Loading… 占位卡**（仅 Back），再发布真实卡片 —— 回调必须立刻携带面板 patch，否则数据加载期间 Lark 会把面板恢复到点击前（菜单）的卡片，肉眼可见"退回菜单"（用户报告）。渲染失败时该卡的栈重置回菜单根并重发菜单卡，换页与 Back 永不死（用户报告：渲染失败后"换页按钮不再有反应"）。
 
-- 菜单（`⚙️ dsh-feishu panel`）：`buildPanelCard(statusLine, running, commands, page)` —— 核心行（运行中显示 Stop / Retry / Copy）保持最前；其下是完整命令调色板，按类别分组并带 emoji 标题（`🤖 Agent` / `🧩 Session` / `🎨 Card` / `💬 Chat` / `⚙️ System`），每页 `PANEL_PAGE_SIZE = 12` 个按钮，一个安静的 `note` 页码指示器（`Commands · page 1/2`），◀️/▶️ 导航在边界处隐藏。每个按钮标记 `{kind:'command', name}` 并执行与斜杠命令相同的处理器。状态行携带聊天的会话上下文（`` session `id` · `cwd` ``）。类别块绝不会跨页拆分；按当前命令集，agent(1) + session(6) + card(1) + chat(1) 刚好填满第 1 页，system 组独占第 2 页。
+- 菜单（`⚙️ dsh-feishu panel`）：`buildPanelCard(statusLine, running, commands, page)`。**第 1 页是手工挑选的常用页**（用户需求）：只放 `⭐ 常用` / `⭐ Common` 组 —— `🤖 智能体`、`🛑 全部停止`、`📚 选择项目`、`🎨 生图卡片`，没有核心行、没有其他组。**第 2 页起**是完整命令调色板，仍按类别分组并带 emoji 标题（`🤖 Agent` / `🧩 Session` / `🎨 Card` / `💬 Chat` / `⚙️ System`），核心操作行（运行中 `⏹ Stop current turn`、`🔁 Retry last`、`📋 Copy last`）以一条分隔线跟在当页内容之后。首屏之后每页 `PANEL_PAGE_SIZE = 12` 个按钮（`PANEL_FIRST_PAGE_SIZE = 4` 限制常用组），一个安静的 `note` 页码指示器（`Commands · page 1/3`），◀️/▶️ 导航在边界处隐藏。每个按钮标记 `{kind:'command', name}` 并执行与斜杠命令相同的处理器。状态行携带聊天的会话上下文（`` session `id` · `cwd` ``）。类别块绝不会跨页拆分；按当前命令集，常用组为第 1 页，agent(1) + session(6) + card(1) + chat(1) 为第 2 页，system 组独占第 3 页。常用清单本身在 `Bridge.panelCommands`（`commonNames`），超出一页会 fail loud 而不是静默溢出。
 - **输入子视图**（`📁 Change working directory`、`👥 Create group`、`🎯 Goal`、`💬 Feedback`、`✏️ Rename session`）：根级 `form`，含一个 `input` 和一个带 `name` 的 `form_submit` 按钮（飞书拒绝无名字的表单按钮 —— ErrCode 200530）。标签在 `form` 之外；提交后以输入值执行命令并回到菜单。
 - **确认子视图**（`✨ New chat`、`🧹 Compact`）：破坏性操作先说明后果；确认后执行命令并回到菜单。
 - **结果卡片（面板原则，用户需求）**。面板操作若结果是**最终**的，则以一张**新的纯信息卡片**（`✅ Done` / `⚠️ Action failed`，无按钮/输入框）通知：repo/model/permission 选择、重命名、归档、输入/确认提交、恢复、导出，以及所有无子视图的面板命令（help、status、plan、surface status 等）。中间步骤（输入表单、确认提示、选择器）留在面板卡片内并原地更新 —— 需要继续操作的按钮跳转面板，无需再操作的按钮以惰性新卡通知。所有完成路径共享同一个出口（`replyResultCard` + `popToMenu`）：该出口会把面板卡 patch 回菜单根 —— 正是这个 patch 防止 Lark 在回调未携带面板更新时把面板恢复到点击前（第一页）的卡片（用户报告：第二页上的直接结果按钮点击后跳回第一页）。
@@ -972,8 +981,21 @@ turn 重置——整会话累计，镜像 web 的 whole-log `sessionStats`）：
   无 usage 不计）。
 - `contextWindow` — chat 当前模型的 `contextWindow`（经 `ctx.llm` 解析），
   解析前 `undefined`。
+- `costRmb` / `costModel` — 每步 usage 落地时按 CNY 计价的会话费用
+  （`src/cards/pricing.ts`），按 chat 当前模型取价。
 
 `CardSnapshot`/单一渲染路径（`syncCard`）携带它。
+
+**会话人民币费用（用户需求）。** dsh 自身没有任何"钱"概念（`dsh-token-meter`
+报告上下文压力，`dsh-session-stats` 只计步数与耗时），而现成的记账插件跑在
+Desktop 部署自己的进程里、其账本不覆盖本 surface，因此本表面自行对已统计的
+token 计价。`src/cards/pricing.ts` 内置 DeepSeek 人民币价表与官方峰谷两档、
+周末全谷价规则，镜像 `dsh-cost-meter` 的 `lib/pricing.js`，使同一批 token 的
+金额与桌面账本口径一致。每个 `assistant/message` 步在落地瞬间取价（surface 在
+provider 调用后数毫秒内消费事件，且 durable 信封没有可读的逐事件时间戳）；
+cache write 按 cache-hit 价计；未登记模型回退 flash 档。金额渲染为末尾组
+`费用 ¥0.0123` —— 不足一分时给 4 位小数，避免便宜回合显示成 `¥0`。会话没有任何
+同进程用量可计价时（如重启后的 durable 日志回放）省略该组。
 
 **卡/面板形态** — 终态卡上，内容之后、与任何 `📎 Produced` chips 一起，渲染
 一行由 `|` 分隔的组（镜像 web `StatsLine` 组，但只取精确字段）：
@@ -983,6 +1005,7 @@ turn 重置——整会话累计，镜像 web 的 whole-log `sessionStats`）：
    有计费输入时加 `cache X%`。
 3. context occupancy — `context P%`（`usedTokens` 与 `contextWindow` 均已知
    时；四舍五入整数，上限 100）。
+4. 会话费用 — 会话计过价的任意步之后显示 `费用 ¥X.XX`。
 
 工具调用数在 counts 组用括号折叠（`M steps · T tools`），仅当有工具运行时。
 **永不显示 timing 组。**
@@ -993,6 +1016,8 @@ turn 重置——整会话累计，镜像 web 的 whole-log `sessionStats`）：
   渲染零 token 组）。
 - `contextWindow` 未知（模型解析缺失/失败）：省略 context 组（只显示
   counts/tokens 组）。
+- 无同进程 token 用量（重启后的 durable 日志回放）：省略费用组，而不是渲染一个
+  永远不会计费的 `¥0.00`。
 - chat 未固定 cwd：不受影响（这是只读卡行，不发送、不解路径）。
 
 **验收清单**：
@@ -1004,6 +1029,8 @@ turn 重置——整会话累计，镜像 web 的 whole-log `sessionStats`）：
 - [ ] `contextWindow` 与 usedTokens 已知时渲染 context 组，否则省略（单测）。
 - [ ] 无活动 → 无统计行（单测）。
 - [ ] 统计行仅终态（working 不显示），且不改卡片状态（单测）。
+- [ ] 每个已计价步累加 CNY 金额，终态卡渲染 `费用 ¥…` 组；无同进程用量的会话
+      省略该组（单测 + `tests/cards/pricing.spec.ts` 的计价规则）。
 
 ### Reference
 

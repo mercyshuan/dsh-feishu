@@ -1116,15 +1116,11 @@ describe('Bridge', () => {
       },
     } as unknown as SessionEvent);
     await h.bridge.handleEvent('feishu-session-1', turnEndEvent());
-    // Cards default collapsed: the folded line shows the current activity
-    // (no reasoning in this turn → the latest row's own line), and the toggle
-    // reads '▸ Expand'. Expanding reveals the ✅ row.
+    // Cards default collapsed: a FINISHED card hides the thinking/tool rows —
+    // the toggle reads '▸ Expand' and expanding reveals the ✅ row (user
+    // request).
     const collapsed = h.transport.updatedCards.at(-1);
-    expect(
-      collapsed?.elements.some(
-        (el) => el.tag === 'markdown' && 'content' in el && el.content === '✅ Bash · ls',
-      ),
-    ).toBe(true);
+    expect(collapsed?.elements.some((el) => el.tag === 'column_set')).toBe(false);
     await h.bridge.handleCardAction({
       messageId: 'msg-1',
       chatId: 'oc_chat',
@@ -1136,15 +1132,13 @@ describe('Bridge', () => {
     const row = expanded?.elements.find((el) => el.tag === 'column_set');
     const text = row?.tag === 'column_set' ? row.columns[0]?.elements[0] : undefined;
     expect(text?.tag === 'div' ? text.text.content : '').toContain('✅ Bash · ls');
-    // Row 1 = state actions, row 2 = the view toggle (no separate Tools
-    // button).
+    // ONE action row: the panel action, then the view toggle (no Copy/Retry).
     const doneActions = expanded?.elements.filter((el) => el.tag === 'action') ?? [];
     const doneLabels = (index: number): string[] =>
       doneActions[index] && 'actions' in doneActions[index]
         ? doneActions[index].actions.filter((a) => a.tag === 'button').map((a) => a.text.content)
         : [];
-    expect(doneLabels(0)).toEqual(['📋 Copy', '🔁 Retry', '⚙️ Panel']);
-    expect(doneLabels(1)).toEqual(['▾ Collapse']);
+    expect(doneLabels(0)).toEqual(['⚙️ Panel', '▾ Collapse']);
   });
 
   it('streams the folded line as rows arrive', async () => {
@@ -1192,13 +1186,14 @@ describe('Bridge', () => {
       data: { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'hmm…' } },
     } as unknown as SessionEvent);
     await h.bridge.handleEvent('feishu-session-1', turnEndEvent());
-    // Collapsed by default: the folded line carries the current thinking.
+    // Collapsed by default: a FINISHED card hides the thinking rows (they show
+    // only when expanded) — user request.
     const last = h.transport.updatedCards.at(-1);
     expect(
       last?.elements.some(
         (el) => el.tag === 'markdown' && 'content' in el && el.content === '☁️ hmm…',
       ),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it('opens a row-details card from a row expand button', async () => {
@@ -1263,7 +1258,7 @@ describe('Bridge', () => {
     const expanded = h.transport.updatedCards.at(-1);
     expect(h.transport.updatedCards.length).toBe(before + 1);
     expect(expanded?.elements.some((el) => el.tag === 'column_set')).toBe(true);
-    // Toggling again collapses back to the folded line.
+    // Toggling again collapses back to the answer-only card (no rows).
     await h.bridge.handleCardAction({
       messageId: 'msg-1',
       chatId: 'oc_chat',
@@ -1272,11 +1267,6 @@ describe('Bridge', () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
     const collapsed = h.transport.updatedCards.at(-1);
-    expect(
-      collapsed?.elements.some(
-        (el) => el.tag === 'markdown' && 'content' in el && el.content === '🔧 Bash · ls',
-      ),
-    ).toBe(true);
     expect(collapsed?.elements.some((el) => el.tag === 'column_set')).toBe(false);
   });
 
@@ -1521,14 +1511,31 @@ describe('Bridge', () => {
         value: { kind: 'panel' },
       });
       const runningPanel = h.transport.sentCards.at(-1);
-      // The FIRST action element is the core button row (Stop/Retry/Copy);
-      // the palette (command buttons + page nav) follows it.
-      const runningAction = runningPanel?.elements.find((el) => el.tag === 'action');
-      const runningLabels =
-        runningAction && 'actions' in runningAction
-          ? runningAction.actions.filter((a) => a.tag === 'button').map((a) => a.text.content)
-          : [];
-      expect(runningLabels).toEqual(['⏹ Stop current turn', '🔁 Retry last', '📋 Copy last']);
+      // Page 1 is the favorites palette ONLY — the core button row (Stop while
+      // running / Retry / Copy) lives from page 2 on.
+      const actionRows = (card: typeof runningPanel): string[][] =>
+        (card?.elements ?? [])
+          .filter((el): el is Extract<CardElement, { tag: 'action' }> => el.tag === 'action')
+          .map((el) => el.actions.filter((a) => a.tag === 'button').map((a) => a.text.content));
+      expect(actionRows(runningPanel)[0]).toEqual([
+        '🤖 Agent',
+        '🛑 Stop everything',
+        '📚 Pick project',
+        '🎨 Image card',
+      ]);
+      expect(JSON.stringify(runningPanel?.elements ?? [])).not.toContain('Stop current turn');
+      // Page 2 carries the core row (Stop present while the turn runs).
+      await h.bridge.handleCardAction({
+        messageId: lastCardId(h),
+        chatId: 'oc_chat',
+        operatorOpenId: 'ou_user',
+        value: { kind: 'panel-page', page: '1' },
+      });
+      expect(actionRows(h.transport.updatedCards.at(-1))[0]).toEqual([
+        '⏹ Stop current turn',
+        '🔁 Retry last',
+        '📋 Copy last',
+      ]);
       // Turn ends → agent idle → a fresh panel tap has no Stop button.
       await h.bridge.handleEvent('feishu-session-1', turnEndEvent());
       h.agentStore.setStatus('feishu-session-1', 'idle');
@@ -1539,14 +1546,14 @@ describe('Bridge', () => {
         value: { kind: 'panel' },
       });
       // The panel button always posts a FRESH panel card (user report: a tap
-      // must never silently update an off-screen card).
+      // must never silently update an off-screen card) — page 1, favorites.
       const idlePanel = h.transport.sentCards.at(-1);
-      const idleAction = idlePanel?.elements.find((el) => el.tag === 'action');
-      const idleLabels =
-        idleAction && 'actions' in idleAction
-          ? idleAction.actions.filter((a) => a.tag === 'button').map((a) => a.text.content)
-          : [];
-      expect(idleLabels).toEqual(['🔁 Retry last', '📋 Copy last']);
+      expect(actionRows(idlePanel)[0]).toEqual([
+        '🤖 Agent',
+        '🛑 Stop everything',
+        '📚 Pick project',
+        '🎨 Image card',
+      ]);
     });
 
     it('stop mid-turn then aborted turn/end → card shows Stopped, not Done', async () => {
@@ -1592,13 +1599,17 @@ describe('Bridge', () => {
           (el) => el.tag === 'note' && 'elements' in el && el.elements[0]?.content.includes('Done'),
         ),
       ).toBe(false);
-      // Stopped is terminal: Retry/Panel buttons, no Stop.
+      // Stopped is terminal: ONE action row with the Panel button and the
+      // view toggle only (no Stop, no Copy/Retry).
       const action = card?.elements.find((el) => el.tag === 'action');
       const labels =
         action && 'actions' in action
           ? action.actions.filter((a) => a.tag === 'button').map((a) => a.text.content)
           : [];
-      expect(labels).toContain('🔁 Retry');
+      expect(labels).toContain('⚙️ Panel');
+      expect(labels).not.toContain('⏹ Stop turn');
+      expect(labels).not.toContain('🔁 Retry');
+      expect(labels).not.toContain('📋 Copy');
       expect(labels).not.toContain('⏹ Stop');
       // After the abort the agent goes idle; the panel reflects stopped.
       h.agentStore.setStatus('feishu-session-1', 'idle');
@@ -1856,13 +1867,18 @@ describe('Bridge', () => {
         (el): el is Extract<CardElement, { tag: 'markdown' }> => el.tag === 'markdown',
       );
       expect(markdowns?.[0]?.content).toContain('Idle');
-      // Idle → no Stop button.
+      // Page 1 is the favorites palette (no Stop button anywhere on it).
       const action = panel?.elements.find((el) => el.tag === 'action');
       const labels =
         action && 'actions' in action
           ? action.actions.filter((a) => a.tag === 'button').map((a) => a.text.content)
           : [];
-      expect(labels).toEqual(['🔁 Retry last', '📋 Copy last']);
+      expect(labels).toEqual([
+        '🤖 Agent',
+        '🛑 Stop everything',
+        '📚 Pick project',
+        '🎨 Image card',
+      ]);
     });
     it('a second message during a running turn opens a fresh card (lifecycle)', async () => {
       const h = makeHarness({ throttleMs: 0 });
@@ -1965,7 +1981,12 @@ describe('Bridge', () => {
         action && 'actions' in action
           ? action.actions.filter((a) => a.tag === 'button').map((a) => a.text.content)
           : [];
-      expect(labels).toEqual(['🔁 Retry last', '📋 Copy last']);
+      expect(labels).toEqual([
+        '🤖 Agent',
+        '🛑 Stop everything',
+        '📚 Pick project',
+        '🎨 Image card',
+      ]);
     });
 
     it('none × toggle → no-op (no card state)', async () => {
@@ -2123,7 +2144,12 @@ describe('Bridge', () => {
         panelAction && 'actions' in panelAction
           ? panelAction.actions.filter((a) => a.tag === 'button').map((a) => a.text.content)
           : [];
-      expect(panelLabels).toEqual(['🔁 Retry last', '📋 Copy last']);
+      expect(panelLabels).toEqual([
+        '🤖 Agent',
+        '🛑 Stop everything',
+        '📚 Pick project',
+        '🎨 Image card',
+      ]);
       // toggle → expand; the re-synced card stays red (error state intact).
       await h.bridge.handleCardAction({
         messageId: 'mem-1',
@@ -2713,14 +2739,17 @@ describe('UX state machine (bug 2 regression)', () => {
     } as unknown as SessionEvent);
     await h.bridge.handleEvent('feishu-session-1', turnEndEvent());
     await new Promise((resolve) => setTimeout(resolve, 0));
-    // Collapsed by default.
+    // Collapsed by default: a FINISHED card hides the tool/thinking rows.
     expect(
       h.transport.updatedCards
         .at(-1)
         ?.elements.some(
           (el) => el.tag === 'markdown' && 'content' in el && el.content === '🔧 Bash · ls',
         ),
-    ).toBe(true);
+    ).toBe(false);
+    expect(h.transport.updatedCards.at(-1)?.elements.some((el) => el.tag === 'column_set')).toBe(
+      false,
+    );
     // Expand.
     await h.bridge.handleCardAction({
       messageId: 'msg-1',
@@ -2753,13 +2782,17 @@ describe('UX state machine (bug 2 regression)', () => {
       value: { kind: 'toggle-rows' },
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
+    // Collapsed again: the finished card hides its rows entirely.
     expect(
       h.transport.updatedCards
         .at(-1)
         ?.elements.some(
           (el) => el.tag === 'markdown' && 'content' in el && el.content === '🔧 Bash · ls',
         ),
-    ).toBe(true);
+    ).toBe(false);
+    expect(h.transport.updatedCards.at(-1)?.elements.some((el) => el.tag === 'column_set')).toBe(
+      false,
+    );
   });
 });
 
@@ -3277,7 +3310,7 @@ describe('/stop (the global panic button)', () => {
 });
 
 describe('panel command palette', () => {
-  it('packs the whole agent button (one button now) with the session/card/chat groups on page 1', async () => {
+  it('opens on the favorites page: exactly the four common commands', async () => {
     const h = makeHarness();
     // The palette card is what /panel (and the panel action) posts.
     await h.bridge.handleCardAction({
@@ -3292,12 +3325,10 @@ describe('panel command palette', () => {
       .flatMap((row) => row.actions)
       .filter((el) => el.tag === 'button' && el.value?.kind === 'command')
       .map((el) => el.value?.name);
-    // The AGENT group is ONE button now (the merged agent card), so page 1
-    // packs the whole agent + session + card + chat groups
-    // = 1 + 6 + 1 + 1 = 9, still inside PANEL_PAGE_SIZE; the system group
-    // keeps its own page 2.
-    expect(commandNames.at(-1)).toBe('group');
-    expect(commandNames).toHaveLength(9);
+    // Page 1 is the hand-picked favorites group alone (user request).
+    expect(commandNames).toEqual(['agent', 'stop', 'repo', 'imagecard']);
+    // The non-command core row (Stop/Retry/Copy) is NOT on page 1.
+    expect(JSON.stringify(card?.elements ?? [])).not.toContain('Retry last');
   });
 
   it('the image-card button runs the allowlisted create command (no agent turn)', async () => {
@@ -3613,12 +3644,16 @@ describe('panel command palette', () => {
           ? el.actions.filter((a) => a.tag === 'button').map((a) => a.text.content)
           : [],
       ) ?? [];
-    // Page 1 carries the ONE AGENT button (the merged agent card) TOGETHER
-    // WITH the session and chat groups — one page, so the agent settings are
-    // visible without a page flip.
-    expect(labels).toContain('🤖 Agent');
-    expect(labels).toContain('🗂️ Sessions');
-    expect(labels).toContain('➕ New chat');
+    // Page 1 is the hand-picked favorites palette (user request): the four
+    // common commands, no session/chat group and no core row.
+    expect(labels.slice(0, 4)).toEqual([
+      '🤖 Agent',
+      '🛑 Stop everything',
+      '📚 Pick project',
+      '🎨 Image card',
+    ]);
+    expect(labels).not.toContain('🗂️ Sessions');
+    expect(labels).not.toContain('🔁 Retry last');
     // The five settings the agent card carries are NOT palette buttons any
     // more: they live on the one card (the slash lines still work).
     expect(labels).not.toContain('🤖 Model');
@@ -3631,7 +3666,8 @@ describe('panel command palette', () => {
     // Resume lives inside the Sessions flow; a standalone button is
     // redundant (user report).
     expect(labels).not.toContain('↩️ Resume session');
-    // Page 2 holds the system group (help/status + the dsh web wrappers).
+    // Page 2 holds the agent + session + card + chat groups; the system group
+    // (help/status + the dsh web wrappers) keeps page 3.
     await h.bridge.handleCardAction({
       messageId: lastCardId(h),
       chatId: 'oc_chat',
@@ -3645,9 +3681,25 @@ describe('panel command palette', () => {
           ? el.actions.filter((a) => a.tag === 'button').map((a) => a.text.content)
           : [],
       ) ?? [];
-    expect(labels2).toContain('📤 Export');
-    expect(labels2).toContain('🎯 Goal');
-    expect(labels2).toContain('🧹 Compact');
+    expect(labels2).toContain('🗂️ Sessions');
+    expect(labels2).toContain('➕ New chat');
+    expect(labels2).not.toContain('📤 Export');
+    await h.bridge.handleCardAction({
+      messageId: lastCardId(h),
+      chatId: 'oc_chat',
+      operatorOpenId: 'ou_user',
+      value: { kind: 'panel-page', page: '2' },
+    });
+    const panel3 = h.transport.updatedCards.at(-1);
+    const labels3 =
+      panel3?.elements.flatMap((el) =>
+        el.tag === 'action'
+          ? el.actions.filter((a) => a.tag === 'button').map((a) => a.text.content)
+          : [],
+      ) ?? [];
+    expect(labels3).toContain('📤 Export');
+    expect(labels3).toContain('🎯 Goal');
+    expect(labels3).toContain('🧹 Compact');
     // /panel is reachable as a slash line but its palette button is hidden —
     // a palette button that opens the panel would be the panel launching
     // itself (user report).
@@ -3673,7 +3725,7 @@ describe('panel command palette', () => {
     expect(
       panel?.elements.some(
         (el) =>
-          el.tag === 'note' && 'elements' in el && el.elements[0]?.content.includes('page 1/2'),
+          el.tag === 'note' && 'elements' in el && el.elements[0]?.content.includes('page 1/3'),
       ),
     ).toBe(true);
     const navLabels = (card: CardJson | undefined): string[] =>
@@ -3699,10 +3751,25 @@ describe('panel command palette', () => {
     expect(
       panel2?.elements.some(
         (el) =>
-          el.tag === 'note' && 'elements' in el && el.elements[0]?.content.includes('page 2/2'),
+          el.tag === 'note' && 'elements' in el && el.elements[0]?.content.includes('page 2/3'),
       ),
     ).toBe(true);
-    expect(navLabels(panel2)).toEqual(['◀️ Prev']);
+    expect(navLabels(panel2)).toEqual(['◀️ Prev', 'Next ▶️']);
+    // The LAST page is the system group: Prev only, no Next.
+    await h.bridge.handleCardAction({
+      messageId: lastCardId(h),
+      chatId: 'oc_chat',
+      operatorOpenId: 'ou_user',
+      value: { kind: 'panel-page', page: '2' },
+    });
+    const panel3 = h.transport.updatedCards.at(-1);
+    expect(
+      panel3?.elements.some(
+        (el) =>
+          el.tag === 'note' && 'elements' in el && el.elements[0]?.content.includes('page 3/3'),
+      ),
+    ).toBe(true);
+    expect(navLabels(panel3)).toEqual(['◀️ Prev']);
   });
 
   it('panel-page clamps out-of-range pages and ignores non-numeric ones', async () => {
@@ -3755,13 +3822,13 @@ describe('panel command palette', () => {
     expect(
       updated?.elements.some(
         (el) =>
-          el.tag === 'note' && 'elements' in el && el.elements[0]?.content.includes('page 2/2'),
+          el.tag === 'note' && 'elements' in el && el.elements[0]?.content.includes('page 2/3'),
       ),
     ).toBe(true);
     expect(h.transport.sentCards).toHaveLength(1);
   });
 
-  it('a direct-result button on page 2 keeps the panel on page 2 (no pre-click revert)', async () => {
+  it('a direct-result button on a later page keeps the panel on that page (no pre-click revert)', async () => {
     const h = makeHarness();
     await h.bridge.handleCardAction({
       messageId: 'mem-1',
@@ -3769,12 +3836,18 @@ describe('panel command palette', () => {
       operatorOpenId: 'ou_user',
       value: { kind: 'panel' },
     });
-    // The system group (help among them) lives on page 2 — one flip.
+    // The system group (help among them) lives on the LAST page — two flips.
     await h.bridge.handleCardAction({
       messageId: lastCardId(h),
       chatId: 'oc_chat',
       operatorOpenId: 'ou_user',
       value: { kind: 'panel-page', page: '1' },
+    });
+    await h.bridge.handleCardAction({
+      messageId: lastCardId(h),
+      chatId: 'oc_chat',
+      operatorOpenId: 'ou_user',
+      value: { kind: 'panel-page', page: '2' },
     });
     // help/status/plan are direct-result commands: no input/confirm/picker
     // sub-view. The state-machine completion exit MUST patch the panel card
@@ -3791,7 +3864,7 @@ describe('panel command palette', () => {
     expect(
       afterHelp?.elements.some(
         (el) =>
-          el.tag === 'note' && 'elements' in el && el.elements[0]?.content.includes('page 2/2'),
+          el.tag === 'note' && 'elements' in el && el.elements[0]?.content.includes('page 3/3'),
       ),
     ).toBe(true);
     // The panel card itself was never re-posted — only the inert result card
@@ -4956,7 +5029,14 @@ describe('/panel command', () => {
       core && 'actions' in core
         ? core.actions.filter((a) => a.tag === 'button').map((a) => a.text.content)
         : [];
-    expect(coreLabels).toEqual(['🔁 Retry last', '📋 Copy last']);
+    // Page 1 is the favorites palette (idle → no Stop anywhere on it).
+    expect(coreLabels).toEqual([
+      '🤖 Agent',
+      '🛑 Stop everything',
+      '📚 Pick project',
+      '🎨 Image card',
+    ]);
+    expect(JSON.stringify(panel?.elements ?? [])).not.toContain('Stop current turn');
     expect(
       panel?.elements.some(
         (el) => el.tag === 'markdown' && 'content' in el && el.content.includes('No session yet'),
@@ -4974,7 +5054,27 @@ describe('/panel command', () => {
       core && 'actions' in core
         ? core.actions.filter((a) => a.tag === 'button').map((a) => a.text.content)
         : [];
-    expect(coreLabels).toEqual(['⏹ Stop current turn', '🔁 Retry last', '📋 Copy last']);
+    // Page 1 is the favorites palette; /panel stays allowed while running and
+    // the Stop-current-turn button is one page flip away (page 2).
+    expect(coreLabels).toEqual([
+      '🤖 Agent',
+      '🛑 Stop everything',
+      '📚 Pick project',
+      '🎨 Image card',
+    ]);
+    await h.bridge.handleCardAction({
+      messageId: lastCardId(h),
+      chatId: 'oc_chat',
+      operatorOpenId: 'ou_user',
+      value: { kind: 'panel-page', page: '1' },
+    });
+    const page2Labels =
+      h.transport.updatedCards
+        .at(-1)
+        ?.elements.filter((el) => el.tag === 'action')[0]
+        ?.actions.filter((a) => a.tag === 'button')
+        .map((a) => a.text.content) ?? [];
+    expect(page2Labels).toEqual(['⏹ Stop current turn', '🔁 Retry last', '📋 Copy last']);
   });
 });
 
