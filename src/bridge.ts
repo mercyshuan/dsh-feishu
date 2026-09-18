@@ -1229,8 +1229,9 @@ export class Bridge {
    *
    * Session cancellation must happen HERE — sessions are in-process objects and
    * an external script cannot reach them; the script only cleans up after them.
-   * The returned text says which half ran and which half did not, so an
-   * unconfigured cleanup script is visible instead of silently skipped.
+   * The reply is the cancel count; the cleanup half speaks up only when it could
+   * NOT run (unconfigured entry, or a refusal), so a missing or broken script is
+   * still visible instead of silently skipped.
    *
    * The cancel half reads the in-memory agent registry only (no stored history,
    * no await), so the panic button answers immediately; see
@@ -1259,7 +1260,13 @@ export class Bridge {
           formValue: {},
         },
       );
-      lines.push(slashRunResult('stop', outcome).text);
+      // A STARTED cleanup run stays silent: the cancel count above is the whole
+      // answer, and the child pid / capture path are operational detail that the
+      // service log already records. A refusal is still reported — otherwise a
+      // misconfigured entry would look exactly like a clean stop.
+      if (!outcome.ok) {
+        lines.push(slashRunResult('stop', outcome).text);
+      }
     } else {
       // The cleanup half is a deployment choice, but the wording must not claim
       // turns were cancelled when there were none to cancel.

@@ -3311,7 +3311,12 @@ describe('/stop (the global panic button)', () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     expect(readFileSync(out, 'utf8')).toBe('--all');
-    expect(h.transport.sentTexts.at(-1)?.text ?? '').toContain('/stop');
+    // A STARTED cleanup run stays silent: the reply is the cancel count alone,
+    // with no pid and no capture path (both are in the service log).
+    const reply = h.transport.sentTexts.at(-1)?.text ?? '';
+    expect(reply).toContain('Stopped 1 running conversation(s).');
+    expect(reply).not.toContain('/stop');
+    expect(reply).not.toContain('pid');
   });
 
   it('never consults the session corpus — not even as a fallback', async () => {
@@ -3352,7 +3357,7 @@ describe('/stop (the global panic button)', () => {
     h.agentStore.setStatus('feishu-idle', 'idle');
     await h.bridge.handleMessage(message({ messageId: 'om_msg2', text: '/stop' }));
     const reply = h.transport.sentTexts.at(-1)?.text ?? '';
-    expect(reply).toContain('No running conversation to stop.');
+    expect(reply).toContain('No conversation is running right now.');
     expect(h.agentStore.cancels).toEqual([]);
     // The cleanup half is missing, but the reply must not say in-process turns
     // were cancelled when nothing was running.
