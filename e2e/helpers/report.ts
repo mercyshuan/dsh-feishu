@@ -15,7 +15,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, join, relative } from 'node:path';
+import { basename, join, relative, sep } from 'node:path';
 
 /** One artifact the run produced. */
 export interface E2eArtifact {
@@ -35,6 +35,22 @@ export interface E2eManifest {
 /** File extensions counted as screenshots / videos. */
 const SCREENSHOT_EXT = new Set(['.png', '.jpg', '.jpeg']);
 const VIDEO_EXT = new Set(['.webm', '.mp4']);
+
+/**
+ * A path relative to the report dir, always with POSIX separators.
+ *
+ * `relative()` yields backslashes on Windows, and these strings are consumed
+ * as URL-ish references — `<img src>` / `<video src>` in the report HTML and
+ * `artifacts[].path` in `report.json`/`manifest.json` (the committed report
+ * layout and every assertion are slash-separated, so the generator must be
+ * platform-independent, not the reader).
+ * @param from - the base directory.
+ * @param to - the target path.
+ * @returns the forward-slash relative path.
+ */
+function relativePosix(from: string, to: string): string {
+  return relative(from, to).split(sep).join('/');
+}
 
 /**
  * Collect the artifacts under `reportDir` (recursively, excluding the
@@ -66,7 +82,7 @@ export function collectArtifacts(reportDir: string): E2eArtifact[] {
             ? 'video'
             : undefined;
         if (kind !== undefined) {
-          out.push({ kind, path: relative(reportDir, full), size: stat.size });
+          out.push({ kind, path: relativePosix(reportDir, full), size: stat.size });
         }
       }
     }
@@ -292,7 +308,7 @@ function populateCaseArtifacts(runDir: string, cases: E2eCase[]): void {
         copyFileSync(join(shotsDir, entry), target);
         artifacts.push({
           kind: 'screenshot',
-          path: relative(caseDir, target),
+          path: relativePosix(caseDir, target),
           size: statSync(target).size,
         });
       }
@@ -318,7 +334,7 @@ function copyArtifact(
     copyFileSync(src, target);
     artifacts.push({
       kind: screenshotKind(src) === 'screenshot' ? 'screenshot' : 'video',
-      path: relative(caseDir, target),
+      path: relativePosix(caseDir, target),
       size: statSync(target).size,
     });
   } catch {

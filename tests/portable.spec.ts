@@ -4,10 +4,21 @@
  * anchor) is verified end-to-end by `buildPortablePackage` / the `--dump-config`
  * smoke test in the PR body; here we cover the deterministic, offline parts
  * (the shipped launcher/doc files and the module surface).
+ *
+ * The packager is loaded through `createRequire`, NOT a static `import`: it is
+ * an executable with a `#!/usr/bin/env node` shebang, and vite-node's
+ * transform keeps that line, so Vite's module runner feeds it to `node:vm`
+ * verbatim and the script dies with `SyntaxError: Invalid or unexpected token`
+ * (Node's own ESM loader strips the shebang; the runner does not). Requiring
+ * it makes Node load the file natively — same module, real surface.
  */
 
+import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
-import {
+import type * as Packager from '../scripts/package-portable.d.mts';
+
+const require = createRequire(import.meta.url);
+const {
   bootstrapFiles,
   buildBundle,
   buildPortablePackage,
@@ -17,7 +28,7 @@ import {
   provideNode,
   resolveNodeVersion,
   writeTemplateHome,
-} from '../scripts/package-portable.mjs';
+} = require('../scripts/package-portable.mjs') as typeof Packager;
 
 describe('package-portable', () => {
   it('exposes the expected build/verify surface', () => {

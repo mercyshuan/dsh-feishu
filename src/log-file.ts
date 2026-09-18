@@ -11,15 +11,24 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { posix } from 'node:path';
 
 /** The surface data directory (default `$DSH_HOME/feishu`). Pass the same
  *  value the plugin resolved so the path is deterministic. */
 export type LogFileDataDir = string;
 
-/** The absolute path of the persistent dsh-feishu log. */
+/**
+ * The absolute path of the persistent dsh-feishu log.
+ *
+ * Composed with POSIX separators on purpose: the value is reported to the user
+ * (`/log`, the export-log failure text, the shipped file name) and asserted as
+ * a stable string, so it must not change shape with the host OS. Windows
+ * accepts forward slashes for file APIs, so the path still opens.
+ * @param dataDir - the surface data directory.
+ * @returns the log file path (forward slashes).
+ */
 export function logFilePath(dataDir: string): string {
-  return join(dataDir, 'logs', 'dsh-feishu.log');
+  return posix.join(dataDir, 'logs', 'dsh-feishu.log');
 }
 
 /**
