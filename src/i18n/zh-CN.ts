@@ -166,8 +166,6 @@ export const zhMessages: Record<MessageKey, string> = {
   'panel.context.noCwd': '尚未选择工作目录 —— 请先通过 /repo 或 /cd 选择',
   'panel.context.noSession': '还没有会话 · `{cwd}`',
   'panel.context.session': '会话 `{session}` · `{cwd}`',
-  'panel.planMode.plan': '🗺️ 计划模式',
-  'panel.planMode.leave': '🗺️ 退出计划模式',
   'panel.renderFailedView': '⚠️ 面板视图渲染失败 —— 请查看机器人日志。',
   'panel.renderFailedCard': '⚠️ 面板卡片无法显示 —— 请查看机器人日志。',
 
@@ -195,6 +193,22 @@ export const zhMessages: Record<MessageKey, string> = {
   'panel.model.effortNone': '未指定思考深度 —— 使用模型自身的默认档位。',
   'panel.model.effortCurrent': '思考深度：{effort}',
   'panel.action.effortPickInvalid': '未选择思考深度。',
+  'panel.agentSettings.title': '🤖 智能体',
+  'panel.agentSettings.intro':
+    '**集中设置本会话的智能体** —— 模型、思考深度、权限、智能体预设、计划模式；改完一项可继续设下一项。',
+  'panel.agentSettings.model': '**模型**',
+  'panel.agentSettings.effort': '**思考深度**',
+  'panel.agentSettings.permission': '**权限**',
+  'panel.agentSettings.preset': '**智能体预设**',
+  'panel.agentSettings.planMode': '**计划模式**',
+  'panel.agentSettings.effortUnavailable': '当前模型未提供思考深度档位。',
+  'panel.agentSettings.planPlaceholder': '开启或关闭计划模式…',
+  'panel.agentSettings.planOn': '已开启',
+  'panel.agentSettings.planOff': '已关闭',
+  'panel.agentSettings.planCurrent': '计划模式：{state}',
+  'panel.agentSettings.planUnavailable': '此部署不支持计划模式。',
+  'panel.action.planModeUnavailable': '计划模式在此部署上不可用。',
+  'panel.action.planModePickInvalid': '未选择计划模式状态。',
   'panel.category.agent': '🤖 智能体',
   'panel.category.session': '🧩 会话',
   'panel.category.card': '🎨 卡片',
@@ -257,6 +271,7 @@ export const zhMessages: Record<MessageKey, string> = {
   'command.cmd.feishuStatus.label': '📡 插件状态',
   'command.cmd.schedule.label': '⏰ 提醒',
   'command.cmd.model.label': '🤖 模型',
+  'command.cmd.agent.label': '🤖 智能体',
   'command.cmd.export.label': '📤 导出会话',
   'command.cmd.sessions.label': '🗂️ 会话管理',
   'command.cmd.resume.label': '↩️ 继续会话',
@@ -298,6 +313,8 @@ export const zhMessages: Record<MessageKey, string> = {
   'command.help.permission': '切换权限预设 —— 沙箱模式 + 审批策略',
   'command.help.preset': '切换该聊天的会话采用的智能体预设',
   'command.help.plan': '进入或退出计划模式（不带参数切换；/plan on|off 显式设置）',
+  'command.help.agent':
+    '打开智能体卡片 —— 模型、思考深度、权限、智能体预设、计划模式集中在一处设置',
 
   // ── /status 文本报告（status 命令的文本输出）──────────────────────────
   'command.status.chat': '聊天：{id}',

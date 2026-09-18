@@ -115,6 +115,8 @@ export interface PanelActionContext {
   applyModelPick(chatId: string, provider: string, model: string): Promise<CommandResult>;
   /** Apply a reasoning-level pick for the chat's current model. */
   applyEffortPick(chatId: string, effort: string): Promise<CommandResult>;
+  /** Apply a plan-mode pick (the merged agent card's on/off dropdown). */
+  applyPlanModeSet(chatId: string, active: boolean): Promise<CommandResult>;
   liveAgent(chatId: string): Agent | undefined;
   resumeSession(chatId: string, sessionId: string, cwd?: string): Promise<CommandResult>;
   exportSessionLog(chatId: string, sessionId: string): Promise<CommandResult>;

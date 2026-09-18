@@ -50,6 +50,9 @@ export interface PanelViewContext {
   permissionPresets(): PermissionPresetService | undefined;
   /** The agent-preset roster service, or `undefined` when not mounted. */
   agentPresets(): AgentPresetsService | undefined;
+  /** The chat's current plan-mode state, or `undefined` when the deployment
+   *  mounts no plan-mode controller (the merged agent card degrades loudly). */
+  planModeState(chatId: string): { readonly active: boolean } | undefined;
   /** The chat's explicitly chosen agent preset, or `undefined` for the
    *  deployment default (the choice applies to the chat's NEXT session — and
    *  to a blank live agent immediately). */

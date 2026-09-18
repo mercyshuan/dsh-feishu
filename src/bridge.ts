@@ -50,7 +50,11 @@ import {
 } from './cards/StreamingCardController.js';
 import type { SessionDetailView, SessionRowView } from './cards/session-list.js';
 import type { StreamingCardManager } from './cards/streaming.js';
-import { registerSurfaceCommands, type SurfaceCommandHost } from './commands/surface.js';
+import {
+  planModeResultText,
+  registerSurfaceCommands,
+  type SurfaceCommandHost,
+} from './commands/surface.js';
 import {
   type CommandInvocation,
   CommandRegistry,
@@ -953,6 +957,7 @@ export class Bridge {
       currentModelSelection: (chatId) => this.currentModelSelection(chatId),
       currentEffort: (chatId) => this.currentEffort(chatId),
       modelReasoning: (chatId) => this.modelReasoning(chatId),
+      planModeState: (chatId) => this.planModeState(chatId),
       ensureAgent: (chatId) => this.ensureAgent(chatId),
       permissionPresets: () => this.options.permissionPresets,
       agentPresets: () => this.agentPresetService(),
@@ -1008,6 +1013,7 @@ export class Bridge {
       applyAgentPreset: (chatId, agentPreset) => this.applyAgentPreset(chatId, agentPreset),
       applyModelPick: (chatId, provider, model) => this.applyModelPick(chatId, provider, model),
       applyEffortPick: (chatId, effort) => this.applyEffortPick(chatId, effort),
+      applyPlanModeSet: (chatId, active) => this.applyPlanModeSet(chatId, active),
       liveAgent: (chatId) => this.liveAgent(chatId),
       resumeSession: (chatId, sessionId, cwd) => this.resumeSession(chatId, sessionId, cwd),
       exportSessionLog: (chatId, sessionId) => this.exportSessionLog(chatId, sessionId),
@@ -1650,26 +1656,49 @@ export class Bridge {
         : sessionId === undefined
           ? `No session yet · \`${cwd}\``
           : `session \`${sessionId}\` · \`${cwd}\``;
-    // Toggle commands show their CURRENT state on the button (plan mode is
-    // the one today — the label flips instead of staying static, user report).
-    const commands = this.panelCommands().map((command) =>
-      command.name === 'plan'
-        ? { ...command, buttonLabel: this.planModeButtonLabel(chatId) }
-        : command,
-    );
-    return buildPanelCard(`${statusLine}\n${contextLine}`, running, commands, page);
+    // No per-command label overrides remain: plan mode (the one toggle) moved
+    // onto the merged agent card, so every palette label is static.
+    return buildPanelCard(`${statusLine}\n${contextLine}`, running, this.panelCommands(), page);
   }
 
-  /** The plan-mode toggle button label for a chat's current state. */
-  private planModeButtonLabel(chatId: string): string {
+  /**
+   * The chat's effective plan-mode state, or `undefined` when the deployment
+   * mounts no plan-mode controller.
+   *
+   * A chat with no live agent (or no session yet) has nothing in plan mode, so
+   * it reports `active: false` rather than `undefined` — the caller
+   * distinguishes "off" from "the service is missing" that way. A PENDING
+   * selection counts as active: the user has already asked for it and the next
+   * pre-step will apply it.
+   * @param chatId - the chat to inspect.
+   * @returns the effective toggle state, or `undefined` without a controller.
+   */
+  planModeState(chatId: string): { readonly active: boolean } | undefined {
     const planMode = this.options.planMode;
-    if (planMode === undefined) return t('panel.planMode.plan');
+    if (planMode === undefined) return undefined;
     const sessionId = this.options.sessionMap.get(chatId);
     const agent = sessionId === undefined ? undefined : this.options.agentStore.get(sessionId);
-    if (agent === undefined) return t('panel.planMode.plan');
+    if (agent === undefined) return { active: false };
     const current = planMode.get(agent);
-    const active = current.pending ?? current.active;
-    return active ? t('panel.planMode.leave') : t('panel.planMode.plan');
+    return { active: current.pending ?? current.active };
+  }
+
+  /**
+   * Set the chat's plan mode (the merged agent card's plan dropdown): resolve
+   * the live agent and hand the target to the controller, mirroring the bare
+   * `/plan` toggle's wording so both paths report the same outcome.
+   * @param chatId - the chat the pick came from.
+   * @param active - the requested state.
+   * @returns the user-facing outcome.
+   */
+  async applyPlanModeSet(chatId: string, active: boolean): Promise<CommandResult> {
+    const planMode = this.options.planMode;
+    if (planMode === undefined) {
+      return { kind: 'error', text: t('panel.action.planModeUnavailable') };
+    }
+    const agent = await this.ensureAgent(chatId);
+    const outcome = planMode.set(agent, active);
+    return { kind: 'success', text: planModeResultText(active, outcome) };
   }
 
   /**
@@ -3270,7 +3299,12 @@ export class Bridge {
       case 'agent-preset-pick':
       case 'model-pick':
       case 'effort-pick':
-      case 'model-page': {
+      case 'model-page':
+      // The merged agent card: the one palette button that opens it and the
+      // plan-mode dropdown it carries (both are Strategy objects like the
+      // picks above).
+      case 'agent-settings':
+      case 'plan-mode-set': {
         // Panel actions are Strategy objects dispatched through the
         // registry; the base-class template owns the lifecycle (gate /
         // transition / busy-first operation).
@@ -3528,6 +3562,7 @@ export class Bridge {
       applyAgentPreset: (chatId, agentPreset) => bridge.applyAgentPreset(chatId, agentPreset),
       applyModelPick: (chatId, provider, model) => bridge.applyModelPick(chatId, provider, model),
       applyEffortPick: (chatId, effort) => bridge.applyEffortPick(chatId, effort),
+      applyPlanModeSet: (chatId, active) => bridge.applyPlanModeSet(chatId, active),
       resumeSession: (chatId, sessionId, cwd) => bridge.resumeSession(chatId, sessionId, cwd),
       isWorking: (chatId) => bridge.refuseWhileWorking(chatId),
       resetChat: (chatId) => bridge.resetChatState(chatId),

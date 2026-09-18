@@ -5,6 +5,7 @@
  */
 
 import { PanelActionRegistry } from './ActionRegistry.js';
+import { AGENT_ACTIONS } from './AgentActions.js';
 import { COMMAND_ACTIONS } from './CommandActions.js';
 import { NAVIGATOR_ACTIONS } from './NavigatorActions.js';
 import { PICK_ACTIONS } from './PickActions.js';
@@ -15,6 +16,7 @@ export function buildPanelActionRegistry(): PanelActionRegistry {
   const registry = new PanelActionRegistry();
   for (const action of [
     ...NAVIGATOR_ACTIONS,
+    ...AGENT_ACTIONS,
     ...PICK_ACTIONS,
     ...SESSION_ACTIONS,
     ...COMMAND_ACTIONS,

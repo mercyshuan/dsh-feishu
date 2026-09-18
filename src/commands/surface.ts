@@ -94,6 +94,7 @@ const COMMAND_HELP_KEYS: Readonly<Record<string, MessageKey>> = {
   'feishu-status': 'command.help.feishuStatus',
   schedule: 'command.help.schedule',
   model: 'command.help.model',
+  agent: 'command.help.agent',
   export: 'command.help.export',
   sessions: 'command.help.sessions',
   resume: 'command.help.resume',
@@ -171,6 +172,10 @@ export interface SurfaceCommandHost {
   applyModelPick(chatId: string, provider: string, model: string): Promise<CommandResult>;
   /** Apply a thinking-depth (reasoning effort) pick for the current model. */
   applyEffortPick(chatId: string, effort: string): Promise<CommandResult>;
+  /** Apply a plan-mode pick. Wire-only: the merged agent card's plan dropdown
+   *  reaches this through the panel action context, no surface command calls it
+   *  — so a test host may omit it. The real Bridge always provides it. */
+  applyPlanModeSet?(chatId: string, active: boolean): Promise<CommandResult>;
   /** The shared /resume flow (slash line and /sessions Resume button). */
   resumeSession(chatId: string, sessionId: string, cwd?: string): Promise<CommandResult>;
   /** Whether a turn is running (the working-state gate). */
@@ -531,6 +536,10 @@ export function registerSurfaceCommands(commands: CommandRegistry, host: Surface
     usage: '<provider/model>',
     category: 'agent',
     buttonLabel: t('command.cmd.model.label'),
+    // The panel shows ONE agent button (the merged agent card); these five
+    // stay reachable as slash lines (and via /help) but no longer duplicate
+    // that control on the palette.
+    hiddenFromPanel: true,
     handler: async (invocation) => {
       const raw = invocation.rawInput.trim();
       if (raw === '') {
@@ -604,6 +613,7 @@ export function registerSurfaceCommands(commands: CommandRegistry, host: Surface
     usage: '<off|low|high|max>',
     category: 'agent',
     buttonLabel: t('command.cmd.effort.label'),
+    hiddenFromPanel: true,
     handler: async (invocation) => {
       if (options.isWorking(invocation.chatId)) {
         return { kind: 'error', text: t('command.error.turnRunning') };
@@ -765,6 +775,7 @@ export function registerSurfaceCommands(commands: CommandRegistry, host: Surface
     usage: '<preset>',
     category: 'agent',
     buttonLabel: t('command.cmd.permission.label'),
+    hiddenFromPanel: true,
     handler: async (invocation) => {
       const raw = invocation.rawInput.trim();
       if (raw !== '') return runHarnessCommand(options, invocation, 'permission');
@@ -797,6 +808,7 @@ export function registerSurfaceCommands(commands: CommandRegistry, host: Surface
     usage: '<id>',
     category: 'agent',
     buttonLabel: t('command.cmd.preset.label'),
+    hiddenFromPanel: true,
     handler: async (invocation) => {
       if (options.agentPresets === undefined) {
         return { kind: 'error', text: t('panel.action.agentPresetUnavailable') };
@@ -824,6 +836,7 @@ export function registerSurfaceCommands(commands: CommandRegistry, host: Surface
     usage: '[on|off]',
     category: 'agent',
     buttonLabel: t('command.cmd.plan.label'),
+    hiddenFromPanel: true,
     handler: async (invocation) => {
       const raw = invocation.rawInput.trim();
       // A bare /plan toggles plan mode; /plan on|off sets it explicitly. The
@@ -850,6 +863,24 @@ export function registerSurfaceCommands(commands: CommandRegistry, host: Surface
       const target = explicit ?? !(state.pending ?? state.active);
       const outcome = planMode.set(agent, target);
       return { kind: 'success', text: planModeResultText(target, outcome) };
+    },
+  });
+  // /agent: the MERGED agent card. The five settings it carries
+  // (/model, /effort, /permission, /preset, /plan) are each still their own
+  // slash line; the panel exposes this ONE entry so the palette does not
+  // repeat five buttons that all configure the same agent.
+  commands.register({
+    name: 'agent',
+    description: 'Open the agent card: model, thinking depth, permission, agent preset, plan mode',
+    category: 'agent',
+    buttonLabel: t('command.cmd.agent.label'),
+    handler: async (invocation) => {
+      if (options.isWorking(invocation.chatId)) {
+        return { kind: 'error', text: t('command.error.turnRunning') };
+      }
+      // The card renders INSIDE the panel state machine.
+      await options.pushPanel(invocation.chatId, { kind: 'agent-settings' });
+      return { kind: 'success', text: '' };
     },
   });
 }

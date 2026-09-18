@@ -1,7 +1,17 @@
 /**
- * Picker apply actions: the dropdown selection → apply → result → pop to
- * menu half of the panel principle. One template (the base class) covers
- * repo/model/permission picks; each subclass owns only its business step.
+ * Picker apply actions: the dropdown selection → apply → result → completion
+ * half of the panel principle. One template (the base classes) covers
+ * repo/model/permission/agent-preset/effort picks; each subclass owns only its
+ * business step.
+ *
+ * TWO completion exits share the same work:
+ *   - `RepoPickAction` (its own card) keeps the historical one: pop to the menu
+ *     when the card has a parent, else redraw in place.
+ *   - The AGENT picks (model / effort / permission / agent preset) use
+ *     {@link AgentSettingPickAction}: when they run on the merged agent card
+ *     they re-render THAT card instead of popping to the menu — the whole point
+ *     of merging the five settings is setting them one after another without
+ *     re-entering the card.
  *
  * @module @dsh-feishu/dsh-feishu/panel/actions/PickActions
  */
@@ -9,9 +19,36 @@
 import type { CommandResult } from '../../commands.js';
 import type { CardAction } from '../../feishu/types.js';
 import { permissionPresetLabel, t } from '../../i18n/index.js';
-import { applySessionModelSwitch } from '../../model-switch.js';
 import { PanelAction } from './ActionRegistry.js';
 import type { PanelActionContext } from './PanelAction.js';
+
+/** The shared completion exit of a panel pick (also used by the agent card's
+ *  plan-mode action): stay on the merged agent card while it is the current
+ *  view (the pick re-renders it so the next setting can be picked), otherwise
+ *  pop to the menu — or, on a standalone card seeded by a typed command (no
+ *  parent), redraw the current view so it is not left on the busy placeholder.
+ *  @param ctx - the action context.
+ *  @param action - the normalized card callback.
+ */
+export async function finishPick(ctx: PanelActionContext, action: CardAction): Promise<void> {
+  if (ctx.panelViewFor(action.chatId).kind === 'agent-settings') {
+    await ctx.replacePanel(action.chatId, { kind: 'agent-settings' });
+    return;
+  }
+  if (ctx.canReturn(action.chatId)) {
+    await ctx.popToMenu(action.chatId);
+    return;
+  }
+  await ctx.replacePanel(action.chatId, ctx.panelViewFor(action.chatId));
+}
+
+/** Template Method base for the picks that also live on the merged agent card:
+ *  the subclass owns `work`, this base owns the stay-on-agent-card exit. */
+abstract class AgentSettingPickAction extends PanelAction {
+  protected override async finish(ctx: PanelActionContext, action: CardAction): Promise<void> {
+    await finishPick(ctx, action);
+  }
+}
 
 /** `repo-pick` — pin the working directory and remint a fresh session. */
 export class RepoPickAction extends PanelAction {
@@ -48,7 +85,7 @@ export class RepoPickAction extends PanelAction {
 }
 
 /** `permission-pick` — switch the permission preset through the service. */
-export class PermissionPickAction extends PanelAction {
+export class PermissionPickAction extends AgentSettingPickAction {
   readonly kind = 'permission-pick';
   readonly allowedWhileWorking = false;
   protected override busyTitle(): string {
@@ -85,17 +122,6 @@ export class PermissionPickAction extends PanelAction {
       }),
     };
   }
-  protected override async finish(ctx: PanelActionContext, action: CardAction): Promise<void> {
-    // A navigation card (has a parent) pops back to the menu; a standalone
-    // card seeded by a typed command has no parent — it stays (shows the
-    // result posted by runPanelOperation) and redraws its current view so it
-    // is not left on the busy placeholder.
-    if (ctx.canReturn(action.chatId)) {
-      await ctx.popToMenu(action.chatId);
-    } else {
-      await ctx.replacePanel(action.chatId, ctx.panelViewFor(action.chatId));
-    }
-  }
 }
 
 /** `agent-preset-pick` — compose the chat's agent from one agent preset.
@@ -104,7 +130,7 @@ export class PermissionPickAction extends PanelAction {
  *  spot, while a session that already ran a turn keeps its preset (the harness
  *  fixes it) and the pick lands on the chat's NEXT session — the Bridge's
  *  `applyAgentPreset` makes that call and reports which one happened. */
-export class AgentPresetPickAction extends PanelAction {
+export class AgentPresetPickAction extends AgentSettingPickAction {
   readonly kind = 'agent-preset-pick';
   readonly allowedWhileWorking = false;
   protected override busyTitle(): string {
@@ -121,22 +147,11 @@ export class AgentPresetPickAction extends PanelAction {
     }
     return ctx.applyAgentPreset(action.chatId, agentPreset);
   }
-  protected override async finish(ctx: PanelActionContext, action: CardAction): Promise<void> {
-    // A navigation card (has a parent) pops back to the menu; a standalone
-    // card seeded by a typed command has no parent — it stays (shows the
-    // result posted by runPanelOperation) and redraws its current view so it
-    // is not left on the busy placeholder.
-    if (ctx.canReturn(action.chatId)) {
-      await ctx.popToMenu(action.chatId);
-    } else {
-      await ctx.replacePanel(action.chatId, ctx.panelViewFor(action.chatId));
-    }
-  }
 }
 
 /** `model-pick` — switch the chat's model (session + deployment default),
  *  keeping the thinking depth when the new model offers it. */
-export class ModelPickAction extends PanelAction {
+export class ModelPickAction extends AgentSettingPickAction {
   readonly kind = 'model-pick';
   readonly allowedWhileWorking = false;
   protected override busyTitle(): string {
@@ -162,17 +177,6 @@ export class ModelPickAction extends PanelAction {
     // live session.
     return ctx.applyModelPick(action.chatId, parsed.selection.provider, parsed.selection.model);
   }
-  protected override async finish(ctx: PanelActionContext, action: CardAction): Promise<void> {
-    // A navigation card (has a parent) pops back to the menu; a standalone
-    // card seeded by a typed command has no parent — it stays (shows the
-    // result posted by runPanelOperation) and redraws its current view so it
-    // is not left on the busy placeholder.
-    if (ctx.canReturn(action.chatId)) {
-      await ctx.popToMenu(action.chatId);
-    } else {
-      await ctx.replacePanel(action.chatId, ctx.panelViewFor(action.chatId));
-    }
-  }
 }
 
 /** `effort-pick` — pin the thinking depth (reasoning effort) of the chat's
@@ -181,7 +185,7 @@ export class ModelPickAction extends PanelAction {
  *  The level is validated against that model before it is applied: DSH does
  *  not clamp an unsupported effort, so an unadvertised level would only fail
  *  on the next turn — the Bridge refuses it here instead. */
-export class EffortPickAction extends PanelAction {
+export class EffortPickAction extends AgentSettingPickAction {
   readonly kind = 'effort-pick';
   readonly allowedWhileWorking = false;
   protected override busyTitle(): string {
@@ -198,13 +202,6 @@ export class EffortPickAction extends PanelAction {
       });
     }
     return ctx.applyEffortPick(action.chatId, effort);
-  }
-  protected override async finish(ctx: PanelActionContext, action: CardAction): Promise<void> {
-    if (ctx.canReturn(action.chatId)) {
-      await ctx.popToMenu(action.chatId);
-    } else {
-      await ctx.replacePanel(action.chatId, ctx.panelViewFor(action.chatId));
-    }
   }
 }
 

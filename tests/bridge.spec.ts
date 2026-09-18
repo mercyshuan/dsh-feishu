@@ -17,6 +17,8 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   type AgentDefaultModelService,
+  type AgentPresetRow,
+  type AgentPresetsService,
   type AssistantStreamChunk,
   Bridge,
   type BridgeOptions,
@@ -272,6 +274,7 @@ function makeHarness(
     repoRoots?: readonly string[];
     listSessions?: () => Promise<readonly SessionListRow[] | undefined>;
     permissionPresets?: PermissionPresetService;
+    agentPresets?: AgentPresetsService;
     planMode?: PlanModeService;
     agentDefaultModel?: AgentDefaultModelService;
     llm?: LlmService;
@@ -341,6 +344,7 @@ function makeHarness(
     ...(options.permissionPresets !== undefined
       ? { permissionPresets: options.permissionPresets }
       : {}),
+    ...(options.agentPresets !== undefined ? { getAgentPresets: () => options.agentPresets } : {}),
     ...(options.planMode !== undefined ? { planMode: options.planMode } : {}),
     ...(options.agentDefaultModel !== undefined
       ? { agentDefaultModel: options.agentDefaultModel }
@@ -3273,7 +3277,7 @@ describe('/stop (the global panic button)', () => {
 });
 
 describe('panel command palette', () => {
-  it('ends page 1 with the image-card button', async () => {
+  it('packs the whole agent button (one button now) with the session/card/chat groups on page 1', async () => {
     const h = makeHarness();
     // The palette card is what /panel (and the panel action) posts.
     await h.bridge.handleCardAction({
@@ -3288,10 +3292,12 @@ describe('panel command palette', () => {
       .flatMap((row) => row.actions)
       .filter((el) => el.tag === 'button' && el.value?.kind === 'command')
       .map((el) => el.value?.name);
-    // Page 1 = agent(5) + session(6) + card(1) = PANEL_PAGE_SIZE; the card
-    // group closes it (adding `/stop` moved the constant, not this rule).
-    expect(commandNames.at(-1)).toBe('imagecard');
-    expect(commandNames).toHaveLength(PANEL_PAGE_SIZE);
+    // The AGENT group is ONE button now (the merged agent card), so page 1
+    // packs the whole agent + session + card + chat groups
+    // = 1 + 6 + 1 + 1 = 9, still inside PANEL_PAGE_SIZE; the system group
+    // keeps its own page 2.
+    expect(commandNames.at(-1)).toBe('group');
+    expect(commandNames).toHaveLength(9);
   });
 
   it('the image-card button runs the allowlisted create command (no agent turn)', async () => {
@@ -3607,15 +3613,18 @@ describe('panel command palette', () => {
           ? el.actions.filter((a) => a.tag === 'button').map((a) => a.text.content)
           : [],
       ) ?? [];
-    // Page 1 carries the whole AGENT group (the commands that choose HOW the
-    // session runs) TOGETHER WITH the session and chat groups — one page, so
-    // the agent preset is visible without a page flip.
-    expect(labels).toContain('🤖 Model');
-    expect(labels).toContain('🔐 Permission');
-    expect(labels).toContain('🧩 Agent preset');
-    expect(labels).toContain('🗺️ Plan mode');
+    // Page 1 carries the ONE AGENT button (the merged agent card) TOGETHER
+    // WITH the session and chat groups — one page, so the agent settings are
+    // visible without a page flip.
+    expect(labels).toContain('🤖 Agent');
     expect(labels).toContain('🗂️ Sessions');
     expect(labels).toContain('➕ New chat');
+    // The five settings the agent card carries are NOT palette buttons any
+    // more: they live on the one card (the slash lines still work).
+    expect(labels).not.toContain('🤖 Model');
+    expect(labels).not.toContain('🔐 Permission');
+    expect(labels).not.toContain('🧩 Agent preset');
+    expect(labels).not.toContain('🗺️ Plan mode');
     // /clear is the same action as /new and stays slash-only (one panel
     // button, user report) — its button is hidden.
     expect(labels).not.toContain('✨ Fresh start');
@@ -3961,9 +3970,9 @@ describe('panel command palette', () => {
     expect(resultCardTexts(h).some((t) => t.includes('Working directory set to'))).toBe(true);
     // The panel returned to the menu root (same card, updated in place) and
     // the outcome left the panel as an inert result card. Page 1 is the agent
-    // group, so its marker is the agent-preset button.
+    // group, so its marker is the merged agent button.
     const menu = h.transport.updatedCards.at(-1);
-    expect(JSON.stringify(menu?.elements)).toContain('🧩 Agent preset');
+    expect(JSON.stringify(menu?.elements)).toContain('🤖 Agent');
     expect(h.transport.sentCards).toHaveLength(2); // input card + result card
   });
 
@@ -4010,7 +4019,7 @@ describe('panel command palette', () => {
     expect(resultCardTexts(h).some((t) => t.includes('nothing to clear'))).toBe(true);
     // The panel returned to the menu root (page 1 = the agent group).
     const menu = h.transport.updatedCards.at(-1);
-    expect(JSON.stringify(menu?.elements)).toContain('🧩 Agent preset');
+    expect(JSON.stringify(menu?.elements)).toContain('🤖 Agent');
   });
 
   it('a mutating command button is refused while working; read-only allowed', async () => {
@@ -4206,6 +4215,27 @@ class FakePlanModeService implements PlanModeService {
     if (active === this.active) return 'noop';
     this.active = active;
     return 'committed';
+  }
+}
+
+/** Fake agent-preset roster (the merged agent card renders its dropdown). */
+class FakeAgentPresetService implements AgentPresetsService {
+  /** Set once a pick landed (the roster's select path). */
+  remembered = false;
+  private memory: string | undefined;
+  async list(): Promise<readonly AgentPresetRow[]> {
+    return [
+      { id: 'default', name: 'Default', isDefault: true },
+      { id: 'reviewer', name: 'Reviewer', description: 'Read-only reviewer.' },
+    ];
+  }
+  composedPreset(): string | undefined {
+    return this.memory ?? 'default';
+  }
+  async select(_agent: Agent, agentPreset: string): Promise<string> {
+    this.memory = agentPreset;
+    this.remembered = true;
+    return agentPreset;
   }
 }
 
@@ -4518,6 +4548,29 @@ class FakeLlmService implements LlmService {
   }
 }
 
+/** The same catalog PLUS the reasoning metadata `resolveModelInfo` carries: the
+ *  merged agent card renders its thinking-depth dropdown only when the current
+ *  model advertises levels. */
+class FakeReasoningLlmService extends FakeLlmService {
+  async resolveModelInfo(): Promise<{
+    context: { contextWindow: number };
+    reasoning: { efforts: { id: string; name: string }[]; defaultEffort: string };
+  }> {
+    return {
+      context: { contextWindow: 128_000 },
+      reasoning: {
+        efforts: [
+          { id: 'off', name: 'Off' },
+          { id: 'low', name: 'Low' },
+          { id: 'high', name: 'High' },
+          { id: 'max', name: 'Max' },
+        ],
+        defaultEffort: 'high',
+      },
+    };
+  }
+}
+
 describe('/model picker', () => {
   it('each typed /model opens a FRESH, independent card (regression: never reusing an earlier panel card)', async () => {
     const llm = new FakeLlmService();
@@ -4666,6 +4719,228 @@ describe('/model picker', () => {
     });
     expect(h.transport.sentTexts.some((t) => t.text.includes('a turn is running'))).toBe(true);
     expect(defaults.saved).toHaveLength(0);
+  });
+});
+
+describe('merged agent card (the single 🤖 Agent button)', () => {
+  /** Every button label on a card (flattened across its action rows). */
+  const labelsOf = (card: CardJson | undefined): string[] =>
+    card?.elements.flatMap((el) =>
+      el.tag === 'action'
+        ? el.actions.filter((a) => a.tag === 'button').map((a) => a.text.content)
+        : [],
+    ) ?? [];
+
+  /** Every `select_static` marker kind on a card, in card order. */
+  const selectKindsOf = (card: CardJson | undefined): string[] =>
+    card?.elements.flatMap((el) =>
+      el.tag === 'action'
+        ? el.actions.filter((a) => a.tag === 'select_static').map((a) => a.value?.kind ?? '(none)')
+        : [],
+    ) ?? [];
+
+  /** The markdown lines of a card (the section labels live here). */
+  const markdownsOf = (card: CardJson | undefined): string[] =>
+    card?.elements.flatMap((el) => (el.tag === 'markdown' ? [el.content] : [])) ?? [];
+
+  /** A configured harness: model catalog (with reasoning levels) + permission
+   *  presets + an agent-preset roster + a plan-mode controller, so all five
+   *  sections render their real controls. */
+  const configured = (): {
+    h: Harness;
+    plan: FakePlanModeService;
+    presets: FakePermissionService;
+    agentPresets: FakeAgentPresetService;
+  } => {
+    const plan = new FakePlanModeService();
+    const presets = new FakePermissionService();
+    const agentPresets = new FakeAgentPresetService();
+    const h = makeHarness({
+      llm: new FakeReasoningLlmService(),
+      agentDefaultModel: new FakeAgentDefaultModelService(),
+      permissionPresets: presets,
+      agentPresets,
+      planMode: plan,
+    });
+    return { h, plan, presets, agentPresets };
+  };
+
+  /** Open the palette and press its ONE agent button; resolves with the agent
+   *  card's message id. Every panel operation posts a RESULT card beside the
+   *  panel, so a card id captured once must be reused — `lastCardId` would
+   *  point at the newest result card after the first pick. */
+  const openAgentCard = async (h: Harness): Promise<string> => {
+    await h.bridge.handleCardAction({
+      messageId: 'mem-open',
+      chatId: 'oc_chat',
+      operatorOpenId: 'ou_user',
+      value: { kind: 'panel' },
+    });
+    const panelId = lastCardId(h);
+    await h.bridge.handleCardAction({
+      messageId: panelId,
+      chatId: 'oc_chat',
+      operatorOpenId: 'ou_user',
+      value: { kind: 'command', name: 'agent' },
+    });
+    return panelId;
+  };
+
+  it('the palette carries ONE agent button; the five settings are not buttons', async () => {
+    const h = makeHarness();
+    await h.bridge.handleCardAction({
+      messageId: 'mem-open',
+      chatId: 'oc_chat',
+      operatorOpenId: 'ou_user',
+      value: { kind: 'panel' },
+    });
+    const labels = labelsOf(h.transport.sentCards.at(-1) ?? h.transport.updatedCards.at(-1));
+    expect(labels).toContain('🤖 Agent');
+    for (const gone of [
+      '🤖 Model',
+      '🧠 Effort',
+      '🔐 Permission',
+      '🧩 Agent preset',
+      '🗺️ Plan mode',
+    ]) {
+      expect(labels).not.toContain(gone);
+    }
+  });
+
+  it('the agent button pushes the merged card with all five settings, in order', async () => {
+    const { h } = configured();
+    await openAgentCard(h);
+    const card = h.transport.updatedCards.at(-1) ?? h.transport.sentCards.at(-1);
+    expect(card?.header?.title.content).toBe('🤖 Agent');
+    // The five sections render as their own labels, in the documented order.
+    const markdowns = markdownsOf(card);
+    const sectionLabels = [
+      '**Model**',
+      '**Thinking depth**',
+      '**Permission**',
+      '**Agent preset**',
+      '**Plan mode**',
+    ];
+    const positions = sectionLabels.map((label) => markdowns.indexOf(label));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    // One control per setting, each carrying its own action marker.
+    expect(selectKindsOf(card)).toEqual([
+      'model-pick',
+      'effort-pick',
+      'permission-pick',
+      'agent-preset-pick',
+      'plan-mode-set',
+    ]);
+    // Pushed from the palette → the card carries the Back row to the menu.
+    expect(JSON.stringify(card?.elements ?? [])).toContain('⬅ Back');
+  });
+
+  it('a model pick on the agent card re-renders THAT card instead of popping to the menu', async () => {
+    const { h } = configured();
+    const cardId = await openAgentCard(h);
+    await h.bridge.handleCardAction({
+      messageId: cardId,
+      chatId: 'oc_chat',
+      operatorOpenId: 'ou_user',
+      value: { kind: 'model-pick' },
+      option: 'deepseek-official/deepseek-r1',
+    });
+    // Still the agent card (NOT the palette menu)…
+    const card = h.transport.updatedCards.at(-1);
+    expect(card?.header?.title.content).toBe('🤖 Agent');
+    // …still carrying every control, so the next setting can be picked…
+    expect(selectKindsOf(card)).toContain('plan-mode-set');
+    // …and the outcome still left the panel as a result card.
+    expect(resultCardTexts(h).some((t) => t.includes('deepseek-r1'))).toBe(true);
+  });
+
+  it('stays on the agent card through every pick (permission → agent preset)', async () => {
+    const { h, presets, agentPresets } = configured();
+    const cardId = await openAgentCard(h);
+    const picks: Array<{ value: Record<string, string>; option: string }> = [
+      { value: { kind: 'permission-pick' }, option: 'read-only' },
+      { value: { kind: 'agent-preset-pick' }, option: 'reviewer' },
+    ];
+    for (const pick of picks) {
+      await h.bridge.handleCardAction({
+        messageId: cardId,
+        chatId: 'oc_chat',
+        operatorOpenId: 'ou_user',
+        value: pick.value,
+        option: pick.option,
+      });
+      expect(h.transport.updatedCards.at(-1)?.header?.title.content).toBe('🤖 Agent');
+    }
+    expect(presets.applied).toEqual(['read-only']);
+    expect(agentPresets.remembered).toBe(true);
+  });
+
+  it('the plan-mode dropdown applies the state and stays on the agent card', async () => {
+    const { h, plan } = configured();
+    const cardId = await openAgentCard(h);
+    await h.bridge.handleCardAction({
+      messageId: cardId,
+      chatId: 'oc_chat',
+      operatorOpenId: 'ou_user',
+      value: { kind: 'plan-mode-set' },
+      option: 'on',
+    });
+    expect(plan.calls).toEqual([true]);
+    expect(h.transport.updatedCards.at(-1)?.header?.title.content).toBe('🤖 Agent');
+    expect(resultCardTexts(h).some((t) => t.includes('Plan mode on'))).toBe(true);
+    // The re-rendered card now reports the active state.
+    expect(JSON.stringify(h.transport.updatedCards.at(-1)?.elements ?? [])).toContain(
+      'Plan mode: On',
+    );
+  });
+
+  it('an unknown plan-mode value is refused without touching the controller', async () => {
+    const { h, plan } = configured();
+    const cardId = await openAgentCard(h);
+    await h.bridge.handleCardAction({
+      messageId: cardId,
+      chatId: 'oc_chat',
+      operatorOpenId: 'ou_user',
+      value: { kind: 'plan-mode-set' },
+      option: 'maybe',
+    });
+    expect(plan.calls).toEqual([]);
+    expect(resultCardTexts(h).some((t) => t.includes('No plan-mode state was chosen'))).toBe(true);
+  });
+
+  it('degrades each section loudly when its service is not mounted', async () => {
+    // No llm catalog, no permission presets, no preset roster, no plan mode.
+    const h = makeHarness();
+    await openAgentCard(h);
+    const card = h.transport.updatedCards.at(-1) ?? h.transport.sentCards.at(-1);
+    expect(card?.header?.title.content).toBe('🤖 Agent');
+    // Every section label still renders, each with a loud line instead of a
+    // dead control.
+    const body = JSON.stringify(card?.elements ?? []);
+    expect(body).toContain('**Model**');
+    expect(body).toContain('**Thinking depth**');
+    expect(body).toContain('**Permission**');
+    expect(body).toContain('**Agent preset**');
+    expect(body).toContain('**Plan mode**');
+    // Not one of the five settings offers a dropdown without its service.
+    expect(selectKindsOf(card)).toEqual([]);
+  });
+
+  it('a typed /agent opens the same merged card', async () => {
+    const { h } = configured();
+    await h.bridge.handleMessage(message({ text: '/agent' }));
+    const card = h.transport.updatedCards.at(-1) ?? h.transport.sentCards.at(-1);
+    expect(card?.header?.title.content).toBe('🤖 Agent');
+    expect(selectKindsOf(card)).toEqual([
+      'model-pick',
+      'effort-pick',
+      'permission-pick',
+      'agent-preset-pick',
+      'plan-mode-set',
+    ]);
+    // A typed command seeds a standalone card (no parent) → no Back row.
+    expect(JSON.stringify(card?.elements ?? [])).not.toContain('⬅ Back');
   });
 });
 

@@ -37,6 +37,7 @@ function subViewFor(
 ):
   | { readonly view: 'input'; readonly command: PanelInputCommand }
   | { readonly view: 'sessions' }
+  | { readonly view: 'agent-settings' }
   | { readonly view: 'picker'; readonly picker: 'repo' | 'model' | 'permission' }
   | { readonly view: 'confirm'; readonly command: 'clear' | 'compact' }
   | undefined {
@@ -44,6 +45,9 @@ function subViewFor(
     return { view: 'input', command: name };
   }
   if (name === 'sessions') return { view: 'sessions' };
+  // The merged agent card: one palette button for model + thinking depth +
+  // permission + agent preset + plan mode.
+  if (name === 'agent') return { view: 'agent-settings' };
   if (name === 'repo' || name === 'model' || name === 'permission') {
     return { view: 'picker', picker: name };
   }
@@ -75,6 +79,8 @@ export class CommandAction extends PanelAction {
       await ctx.pushPanel(action.chatId, { kind: 'input', command: route.command });
     } else if (route.view === 'sessions') {
       await ctx.pushPanel(action.chatId, { kind: 'sessions', archived: false });
+    } else if (route.view === 'agent-settings') {
+      await ctx.pushPanel(action.chatId, { kind: 'agent-settings' });
     } else if (route.view === 'picker') {
       await ctx.pushPanel(action.chatId, { kind: 'picker', picker: route.picker, page: 0 });
     } else {

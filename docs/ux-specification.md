@@ -294,7 +294,7 @@ rounds 1–5.
 
 ## 8. Command surface
 
-### 8.1 Command set (20 commands: 15 surface + 5 web wrappers)
+### 8.1 Command set (21 commands: 16 surface + 5 web wrappers)
 
 Every command is a `SurfaceCommand`: one handler shared by the slash line
 and the panel button (button = command, botmux `/list-slash-command`
@@ -314,6 +314,7 @@ palette idea). `category` groups the panel palette.
 | `/model` | system | **model picker card** (catalog from `ctx.llm` `listProviders` × `listModels`, current preselected); a pick sets the default for new sessions. `/model <provider>/<model>` sets it directly. Surface-native — the web `/model` is a client popup with no host command |
 | `/export` | system | send this chat's session log as a **file message** (`session-<id>.md` markdown transcript from `ctx.sessionQuery.readSession`) — the Feishu equivalent of the web's browser-download `/export` |
 | `/panel` | system | open the control panel card from any chat (slash line only — its palette button is hidden, since a palette button that opens the panel would be the panel launching itself) |
+| `/agent` | agent | open the **merged agent card** — model, thinking depth, permission, agent preset, and plan mode on ONE panel sub-view (Section 8.7). This is the AGENT group's only palette button; `/model`, `/effort`, `/permission`, `/preset`, and `/plan` keep working as slash lines but their palette buttons are hidden |
 | `/resume [<id>]` | session | resume a saved session; no id opens the `/sessions` picker |
 | `/clear` | session | start a fresh conversation — **non-destructive**: the previous session stays saved and resumable (content-integrity rule) |
 | `/new` | session | alias of `/clear` (web/cc-tui "new chat" parity) |
@@ -468,11 +469,14 @@ menu root and reposts the menu card, so page flips and Back never go dead
 - Menu (`⚙️ dsh-feishu panel`): `buildPanelCard(statusLine, running,
   commands, page)` — the core row (Stop while running / Retry / Copy) stays
   first; below it the full command palette, grouped by category with emoji
-  headers (`🧩 Session` / `💬 Chat` / `⚙️ System`), `PANEL_PAGE_SIZE = 8`
-  buttons per page, a quiet `note` page indicator (`Commands · page 1/2`),
-  and ◀️/▶️ nav hidden at the bounds. Each button stamps `{kind:'command',
-  name}` and executes the same handler as the slash line. The status line
-  carries the chat's session context (`session `id` · `cwd``).
+  headers (`🤖 Agent` / `🧩 Session` / `🎨 Card` / `💬 Chat` / `⚙️ System`),
+  `PANEL_PAGE_SIZE = 12` buttons per page, a quiet `note` page indicator
+  (`Commands · page 1/2`), and ◀️/▶️ nav hidden at the bounds. Each button
+  stamps `{kind:'command', name}` and executes the same handler as the slash
+  line. The status line carries the chat's session context (`` session `id` ·
+  `cwd` ``). A category block is never split across pages; with the shipped
+  set the agent(1) + session(6) + card(1) + chat(1) groups fill page 1 and the
+  system group keeps page 2.
 - **Input sub-view** (`📁 Change working directory`, `👥 Create group`,
   `🎯 Goal`, `💬 Feedback`, `✏️ Rename session`): a root-level `form` with
   one `input` and a `form_submit` button that carries a `name` (Feishu
@@ -510,7 +514,60 @@ menu root and reposts the menu card, so page flips and Back never go dead
     mid-action" bug (user report: sessions-internal operations showed no
     placeholder).
 
-### 8.7 State-machine matrix for the new actions
+### 8.7 The merged AGENT card (one palette button, five settings)
+
+Reference: user request ("merge the model / thinking-depth / permission /
+agent-preset / plan-mode buttons into ONE agent button; tapping it opens a
+card where each can be set"), user feedback rounds 1–5 (a button that needs
+more interaction jumps the panel).
+
+The palette's AGENT group is ONE button, `🤖 Agent` (`/agent`). The five
+commands it replaces (`/model`, `/effort`, `/permission`, `/preset`, `/plan`)
+are still registered with their own button labels and handlers but carry
+`hiddenFromPanel: true` — the `/help` list and every slash line keep working;
+only the palette stops repeating five buttons that configure the same agent.
+
+Tapping `🤖 Agent` PUSHES an `agent-settings` panel view (a transition, so
+`showPanel` posts the `⏳ Loading…` placeholder itself before the catalog
+loads). The card is `buildAgentSettingsCard` in `cards/render.ts`: one header
+(`🤖 Agent`) and one section per setting, each section being the SAME control
+its standalone picker renders —
+
+| Section | Control marker | Preselected with |
+| --- | --- | --- |
+| `**Model**` | `model-pick` (`select_static`, catalog from `ctx.llm`) | the chat's current `provider/model` |
+| `**Thinking depth**` | `effort-pick` (`select_static`, the levels the CURRENT model advertises) | the pinned level, else the model's own default |
+| `**Permission**` | `permission-pick` (`select_static`, `ctx.permissionPresets`) | the session's current preset |
+| `**Agent preset**` | `agent-preset-pick` (`select_static`, the roster) | the preset the live agent was composed from |
+| `**Plan mode**` | `plan-mode-set` (`select_static`, exactly `on`/`off`) | the chat's effective plan state (a pending selection counts as on) |
+
+**A pick on this card stays on it.** `finishPick` (in
+`panel/actions/PickActions.ts`) is the shared completion exit: when the
+current view is `agent-settings` the pick REPLACES that view (re-rendering the
+card with the new current values) instead of popping to the menu — the whole
+point of merging the five settings is setting them one after another without
+re-entering the card. The outcome still leaves the panel as an inert result
+card (`runPanelOperation`). The standalone picker cards (`/model`,
+`/permission`, …) keep their historical pop-to-menu exit.
+
+The card carries the `⬅ Back` row when it was PUSHED from the palette; a card
+seeded directly by a typed `/agent` is a standalone state machine (depth one)
+and renders no Back, exactly like every other typed-command seed.
+
+**Missing services degrade loudly, per section.** No `ctx.llm` catalog →
+`model switching unavailable …`; no `ctx.permissionPresets` → `Permission
+presets are unavailable on this deployment.`; no preset roster → `Agent
+presets are unavailable on this deployment …`; no `ctx.planMode` → `Plan mode
+is unavailable on this deployment.`; a current model that advertises no
+reasoning levels → `The current model offers no thinking-depth levels.`
+instead of a dead dropdown. The section labels always render.
+
+Both action kinds (`agent-settings` opens the card, `plan-mode-set` applies a
+plan pick) go through the panel action registry like every other Strategy
+action (`bridge.handleCardAction` routes them into `panelActions.handle`), so
+they inherit the busy-first/patch-first guarantees.
+
+### 8.8 State-machine matrix for the new actions
 
 | Action \ Status | none | working | done | stopped | error |
 |---|---|---|---|---|---|
@@ -518,6 +575,8 @@ menu root and reposts the menu card, so page flips and Back never go dead
 | command (mutating) | allowed | **refused** "stop first" | allowed | allowed | allowed |
 | resume-session | allowed* | **refused** | allowed* | allowed* | allowed* |
 | panel-page | stateless page re-send (no card-state transition) | | | | |
+| agent-settings (open) | allowed | **allowed** (transition — read-only) | allowed | allowed | allowed |
+| plan-mode-set (pick) | allowed | **refused** | allowed | allowed | allowed |
 
 \* plus target-running → refused; target == current → already-active.
 All cells ACK `{}` and end in a consistent state through `syncCard`

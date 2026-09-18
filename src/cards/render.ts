@@ -156,6 +156,12 @@ export type SurfaceAction =
   // `effort` is optional for the same dropdown-marker reason (the chosen
   // level arrives in the callback's `option`).
   | { readonly kind: 'effort-pick'; readonly effort?: string }
+  // The merged agent-settings card: the palette's single 🤖 Agent button
+  // pushes it (a pure transition).
+  | { readonly kind: 'agent-settings' }
+  // `active` is optional for the same dropdown-marker reason (the chosen
+  // on/off state arrives in the callback's `option`).
+  | { readonly kind: 'plan-mode-set'; readonly active?: string }
   // Interactive approval/question cards (Iteration 3).
   | { readonly kind: 'approval'; readonly decision: 'allow' | 'reject'; readonly id: string }
   | { readonly kind: 'question'; readonly id: string; readonly answer: string }
@@ -1532,6 +1538,349 @@ export function buildModelPickerCard(
     header: { title: { tag: 'plain_text', content: t('panel.model.title') }, template: 'wathet' },
     elements,
   };
+}
+
+/** A required service is missing on this deployment: the section renders a
+ *  loud placeholder instead of a dead control (misconfiguration fails loud). */
+export interface PanelServiceNotice {
+  /** The card header title the standalone picker would use. */
+  readonly title: string;
+  /** The user-facing line explaining what is missing. */
+  readonly markdown: string;
+}
+
+/** The model section of the merged agent-settings card. */
+export interface AgentSettingsModelView {
+  readonly options: readonly ModelOptionView[];
+  readonly current: string | undefined;
+  /** Replaces the dropdown when the llm catalog service is absent. */
+  readonly notice: PanelServiceNotice | undefined;
+}
+
+/** The permission section of the merged agent-settings card. */
+export interface AgentSettingsPermissionView {
+  readonly presets: readonly PermissionPresetView[];
+  /** Replaces the dropdown when no permission-preset service is mounted. */
+  readonly notice: PanelServiceNotice | undefined;
+}
+
+/** The agent-preset section of the merged agent-settings card. */
+export interface AgentSettingsPresetView {
+  readonly presets: readonly AgentPresetView[];
+  /** Replaces the dropdown when the preset roster is not mounted. */
+  readonly notice: PanelServiceNotice | undefined;
+}
+
+/** The plan-mode section of the merged agent-settings card: the CURRENT plan
+ *  state (`active`) or the notice shown when the deployment has no plan-mode
+ *  controller. */
+export interface AgentSettingsPlanView {
+  readonly active: boolean;
+  readonly notice: PanelServiceNotice | undefined;
+}
+
+/** The plan-mode dropdown options: on / off, in that order. */
+const PLAN_MODE_VALUES: readonly { readonly value: string; readonly labelKey: MessageKey }[] = [
+  { value: 'on', labelKey: 'panel.agentSettings.planOn' },
+  { value: 'off', labelKey: 'panel.agentSettings.planOff' },
+];
+
+/**
+ * The plan-mode select: a two-option dropdown + a quiet current-state note.
+ * The chosen value arrives in the callback's `option`, the `{kind}` marker in
+ * the select's own `value` (the repo-picker pattern).
+ * @param plan - the chat's current plan-mode state.
+ * @returns the section's card elements.
+ */
+export function buildAgentSettingsPlanSection(plan: AgentSettingsPlanView): CardElement[] {
+  if (plan.notice !== undefined) {
+    return [{ tag: 'markdown', content: plan.notice.markdown }];
+  }
+  const current = plan.active ? 'on' : 'off';
+  return [
+    {
+      tag: 'action',
+      actions: [
+        {
+          tag: 'select_static',
+          placeholder: { tag: 'plain_text', content: t('panel.agentSettings.planPlaceholder') },
+          initial_option: current,
+          options: PLAN_MODE_VALUES.map((entry) => ({
+            text: { tag: 'plain_text', content: t(entry.labelKey) },
+            value: entry.value,
+          })),
+          value: actionValue({ kind: 'plan-mode-set' }),
+        },
+      ],
+    },
+    {
+      tag: 'note',
+      elements: [
+        {
+          tag: 'plain_text',
+          content: t('panel.agentSettings.planCurrent', {
+            state: t(plan.active ? 'panel.agentSettings.planOn' : 'panel.agentSettings.planOff'),
+          }),
+        },
+      ],
+    },
+  ];
+}
+
+/**
+ * Everything the merged agent-settings card renders: the five per-session
+ * agent controls on ONE card, each carrying its own current state.
+ */
+export interface AgentSettingsView {
+  readonly model: AgentSettingsModelView;
+  /** The current model's thinking levels; an empty `efforts` renders the
+   *  explanatory line instead of a dead dropdown. */
+  readonly reasoning: ReasoningPickerView;
+  readonly permission: AgentSettingsPermissionView;
+  readonly preset: AgentSettingsPresetView;
+  readonly plan: AgentSettingsPlanView;
+}
+
+/**
+ * Build the merged AGENT settings card — the palette's single 🤖 Agent button
+ * opens it and every control lives on this one card: model, thinking depth,
+ * permission preset, agent preset, and plan mode. The sections reuse the SAME
+ * sub-controls the standalone pickers render (`/model`, `/permission`,
+ * `/preset`, `/plan`), stacked under one header with one label per setting.
+ *
+ * The card stays interactive: a pick re-renders THIS card (the caller replaces
+ * the view) instead of popping to the menu, so all five settings can be set in
+ * a single visit.
+ * @param view - the current value of every setting.
+ * @returns Feishu interactive card JSON (v1 layout).
+ */
+export function buildAgentSettingsCard(view: AgentSettingsView): CardJson {
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: 'plain_text', content: t('panel.agentSettings.title') },
+      template: 'wathet',
+    },
+    elements: [
+      { tag: 'markdown', content: t('panel.agentSettings.intro') },
+      { tag: 'hr' },
+      { tag: 'markdown', content: t('panel.agentSettings.model') },
+      ...modelSectionElements(view.model),
+      { tag: 'hr' },
+      { tag: 'markdown', content: t('panel.agentSettings.effort') },
+      ...effortSectionElements(view.reasoning),
+      { tag: 'hr' },
+      { tag: 'markdown', content: t('panel.agentSettings.permission') },
+      ...permissionSectionElements(view.permission),
+      { tag: 'hr' },
+      { tag: 'markdown', content: t('panel.agentSettings.preset') },
+      ...presetSectionElements(view.preset),
+      { tag: 'hr' },
+      { tag: 'markdown', content: t('panel.agentSettings.planMode') },
+      ...buildAgentSettingsPlanSection(view.plan),
+    ],
+  };
+}
+
+/** The model section: the catalog dropdown plus the current-model note (or the
+ *  service notice / the empty-catalog line). */
+function modelSectionElements(model: AgentSettingsModelView): CardElement[] {
+  if (model.notice !== undefined) return [{ tag: 'markdown', content: model.notice.markdown }];
+  const elements: CardElement[] = [];
+  const current = model.options.find((option) => option.current);
+  if (model.options.length === 0) {
+    elements.push({ tag: 'markdown', content: t('panel.model.noneConfigured') });
+  } else {
+    const canPreselect =
+      model.current !== undefined && model.options.some((option) => option.value === model.current);
+    elements.push({
+      tag: 'action',
+      actions: [
+        {
+          tag: 'select_static',
+          placeholder: { tag: 'plain_text', content: t('panel.model.placeholder') },
+          ...(canPreselect ? { initial_option: model.current } : {}),
+          options: model.options.map((option) => ({
+            text: { tag: 'plain_text', content: option.label },
+            value: option.value,
+          })),
+          value: actionValue({ kind: 'model-pick' }),
+        },
+      ],
+    });
+  }
+  elements.push({
+    tag: 'note',
+    elements: [
+      {
+        tag: 'plain_text',
+        content:
+          current === undefined
+            ? model.current === undefined
+              ? t('panel.model.noneSelected')
+              : t('card.currentNote', { label: model.current })
+            : t('card.currentNote', { label: current.label }),
+      },
+    ],
+  });
+  return elements;
+}
+
+/** The thinking-depth section: the levels the CURRENT model advertises (or the
+ *  explanatory line when it advertises none), plus the effective-level note. */
+function effortSectionElements(reasoning: ReasoningPickerView): CardElement[] {
+  const levels = reasoning.efforts;
+  if (levels.length === 0) {
+    return [{ tag: 'markdown', content: t('panel.agentSettings.effortUnavailable') }];
+  }
+  const pinned = reasoning.current;
+  const matches = (id: string | undefined): id is string =>
+    id !== undefined && levels.some((level) => level.id === id);
+  const preselect = matches(pinned)
+    ? pinned
+    : matches(reasoning.modelDefault)
+      ? reasoning.modelDefault
+      : undefined;
+  const effective = pinned ?? reasoning.modelDefault;
+  const effectiveName =
+    effective === undefined
+      ? undefined
+      : (levels.find((level) => level.id === effective)?.name ?? effective);
+  return [
+    {
+      tag: 'action',
+      actions: [
+        {
+          tag: 'select_static',
+          placeholder: { tag: 'plain_text', content: t('panel.model.effortPlaceholder') },
+          ...(preselect !== undefined ? { initial_option: preselect } : {}),
+          options: levels.map((level) => ({
+            text: { tag: 'plain_text', content: level.name },
+            value: level.id,
+          })),
+          value: actionValue({ kind: 'effort-pick' }),
+        },
+      ],
+    },
+    {
+      tag: 'note',
+      elements: [
+        {
+          tag: 'plain_text',
+          content:
+            effectiveName === undefined
+              ? t('panel.model.effortNone')
+              : t('panel.model.effortCurrent', { effort: effectiveName }),
+        },
+      ],
+    },
+  ];
+}
+
+/** The permission section: the preset dropdown (or the service notice / the
+ *  empty-table line). */
+function permissionSectionElements(permission: AgentSettingsPermissionView): CardElement[] {
+  if (permission.notice !== undefined) {
+    return [{ tag: 'markdown', content: permission.notice.markdown }];
+  }
+  const presets = permission.presets;
+  if (presets.length === 0) {
+    return [{ tag: 'markdown', content: t('panel.permission.noneConfigured') }];
+  }
+  const current = presets.find((preset) => preset.current);
+  const currentName = current?.name;
+  const optionValues = new Set(presets.map((preset) => preset.name));
+  const canPreselect = currentName !== undefined && optionValues.has(currentName);
+  return [
+    {
+      tag: 'action',
+      actions: [
+        {
+          tag: 'select_static',
+          placeholder: { tag: 'plain_text', content: t('panel.permission.placeholder') },
+          ...(canPreselect ? { initial_option: currentName } : {}),
+          options: presets.map((preset) => ({
+            text: { tag: 'plain_text', content: preset.label },
+            value: preset.name,
+          })),
+          value: actionValue({ kind: 'permission-pick' }),
+        },
+      ],
+    },
+    {
+      tag: 'note',
+      elements: [
+        {
+          tag: 'plain_text',
+          content:
+            current === undefined
+              ? t('panel.permission.noneSelected')
+              : t('card.currentNote', { label: current.label }),
+        },
+      ],
+    },
+  ];
+}
+
+/** The agent-preset section: the roster dropdown (or the service notice / the
+ *  empty-roster line), plus the preset's description and the roster hint. */
+function presetSectionElements(preset: AgentSettingsPresetView): CardElement[] {
+  if (preset.notice !== undefined) {
+    return [{ tag: 'markdown', content: preset.notice.markdown }];
+  }
+  const presets = preset.presets;
+  if (presets.length === 0) {
+    return [{ tag: 'markdown', content: t('panel.agentPreset.noneConfigured') }];
+  }
+  const current = presets.find((row) => row.current);
+  const currentId = current?.id;
+  const optionIds = new Set(presets.map((row) => row.id));
+  const canPreselect = currentId !== undefined && optionIds.has(currentId);
+  const elements: CardElement[] = [
+    {
+      tag: 'action',
+      actions: [
+        {
+          tag: 'select_static',
+          placeholder: { tag: 'plain_text', content: t('panel.agentPreset.placeholder') },
+          ...(canPreselect ? { initial_option: currentId } : {}),
+          options: presets.map((row) => ({
+            // A broken preset stays visible (it explains itself) but is marked,
+            // so a failure is discovered in the picker instead of at turn time.
+            text: {
+              tag: 'plain_text',
+              content:
+                row.broken === undefined
+                  ? row.label
+                  : `${row.label} ${t('panel.agentPreset.brokenMark')}`,
+            },
+            value: row.id,
+          })),
+          value: actionValue({ kind: 'agent-preset-pick' }),
+        },
+      ],
+    },
+    {
+      tag: 'note',
+      elements: [
+        {
+          tag: 'plain_text',
+          content:
+            current === undefined
+              ? t('panel.agentPreset.noneSelected')
+              : t('card.currentNote', { label: current.label }),
+        },
+      ],
+    },
+  ];
+  if (current !== undefined && current.description !== undefined) {
+    elements.push({ tag: 'markdown', content: current.description });
+  }
+  elements.push({
+    tag: 'note',
+    elements: [{ tag: 'plain_text', content: t('panel.agentPreset.hint') }],
+  });
+  return elements;
 }
 
 /**

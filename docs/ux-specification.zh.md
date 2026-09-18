@@ -211,7 +211,7 @@ done|stopped|error --any action--->  same (state unchanged; card re-synced)
 
 ## 8. 命令面（Command surface）
 
-### 8.1 命令集（20 个命令：15 个 surface + 5 个 web 包装）
+### 8.1 命令集（21 个命令：16 个 surface + 5 个 web 包装）
 
 每个命令都是一个 `SurfaceCommand`：斜杠命令与面板按钮共享同一个处理器（按钮 = 命令，即 botmux `/list-slash-command` 调色板思路）。`category` 对面板调色板进行分组。
 
@@ -229,6 +229,7 @@ done|stopped|error --any action--->  same (state unchanged; card re-synced)
 | `/model` | system | **模型选择器卡片**（目录来自 `ctx.llm` 的 `listProviders` × `listModels`，当前模型预选）；选择后为新会话设置默认模型。`/model <provider>/<model>` 直接设置。surface 原生 —— web 的 `/model` 是客户端弹窗，没有宿主命令 |
 | `/export` | system | 将本聊天的会话日志作为**文件消息**发送（来自 `ctx.sessionQuery.readSession` 的 `session-<id>.md` markdown 转录）—— 相当于 web 端浏览器下载 `/export` 的飞书版 |
 | `/panel` | system | 从任意聊天打开控制面板卡片（仅限斜杠命令 —— 其调色板按钮被隐藏，因为一个打开面板的调色板按钮会让面板自己启动自己） |
+| `/agent` | agent | 打开**合并后的智能体卡片** —— 模型、思考深度、权限、智能体预设、计划模式集中在一个面板子视图（见 8.7 节）。它是 AGENT 组唯一的面板按钮；`/model`、`/effort`、`/permission`、`/preset`、`/plan` 仍可作斜杠命令使用，但调色板按钮已隐藏 |
 | `/resume [<id>]` | session | 恢复已保存会话；不带 id 时打开 `/sessions` 选择器 |
 | `/clear` | session | 开始全新对话 —— **非破坏性**：先前会话保持已保存且可恢复（内容完整性规则） |
 | `/new` | session | `/clear` 的别名（与 web/cc-tui 的 "new chat" 对齐） |
@@ -270,7 +271,7 @@ harness 的裸 `/plan` 和 `/permission` 形式无法*选择*或*切换*：不�
 
 面板是一个**状态机**，而不是无状态重发 —— 而且权威视图栈是**每张卡一份，而不是每聊天一份**：`PanelController` 维护 `Map<chatId, Map<messageId, PanelView[]>>`（菜单根在栈底），只有一条渲染路径（`renderPanelView`）。每张面板卡拥有自己的栈，因此某张卡上的按钮 PUSH / POP / REPLACE **那张卡**的栈，并**原地**渲染那张卡 —— 点旧卡就更新旧卡，绝不会更新别的卡（用户报告："点这张卡，另一张卡响应"）。守护进程重启前留在屏幕上的卡，第一次被点击时从菜单根开始。按钮 PUSH 子视图（`input` 表单、`confirm`、`sessions`、`session-detail`、`picker`）；Back POPS；完成/拒绝回到菜单根（重命名后回到详情）。每次转换都在同一张卡片上原地更新（patch）；更新失败时重发卡片并记录新 id。`/panel` 与打开视图的斜杠命令（`openPanel` / `openPanelView`）会发布**全新**卡片并重置栈 —— 之前的面板卡继续留在屏幕上独立可用，聊天永远不会"一张换另一张"。斜杠命令行更新该聊天**最近发布**的面板卡（`latestPanelCardId`）；卡片回调永远更新**自己那张**卡。异步数据视图（`sessions`、`session-detail`、`picker`）会先发布**⏳ Loading… 占位卡**（仅 Back），再发布真实卡片 —— 回调必须立刻携带面板 patch，否则数据加载期间 Lark 会把面板恢复到点击前（菜单）的卡片，肉眼可见"退回菜单"（用户报告）。渲染失败时该卡的栈重置回菜单根并重发菜单卡，换页与 Back 永不死（用户报告：渲染失败后"换页按钮不再有反应"）。
 
-- 菜单（`⚙️ dsh-feishu panel`）：`buildPanelCard(statusLine, running, commands, page)` —— 核心行（运行中显示 Stop / Retry / Copy）保持最前；其下是完整命令调色板，按类别分组并带 emoji 标题（`🧩 Session` / `💬 Chat` / `⚙️ System`），每页 `PANEL_PAGE_SIZE = 8` 个按钮，一个安静的 `note` 页码指示器（`Commands · page 1/2`），◀️/▶️ 导航在边界处隐藏。每个按钮标记 `{kind:'command', name}` 并执行与斜杠命令相同的处理器。状态行携带聊天的会话上下文（`` session `id` · `cwd` ``）。
+- 菜单（`⚙️ dsh-feishu panel`）：`buildPanelCard(statusLine, running, commands, page)` —— 核心行（运行中显示 Stop / Retry / Copy）保持最前；其下是完整命令调色板，按类别分组并带 emoji 标题（`🤖 Agent` / `🧩 Session` / `🎨 Card` / `💬 Chat` / `⚙️ System`），每页 `PANEL_PAGE_SIZE = 12` 个按钮，一个安静的 `note` 页码指示器（`Commands · page 1/2`），◀️/▶️ 导航在边界处隐藏。每个按钮标记 `{kind:'command', name}` 并执行与斜杠命令相同的处理器。状态行携带聊天的会话上下文（`` session `id` · `cwd` ``）。类别块绝不会跨页拆分；按当前命令集，agent(1) + session(6) + card(1) + chat(1) 刚好填满第 1 页，system 组独占第 2 页。
 - **输入子视图**（`📁 Change working directory`、`👥 Create group`、`🎯 Goal`、`💬 Feedback`、`✏️ Rename session`）：根级 `form`，含一个 `input` 和一个带 `name` 的 `form_submit` 按钮（飞书拒绝无名字的表单按钮 —— ErrCode 200530）。标签在 `form` 之外；提交后以输入值执行命令并回到菜单。
 - **确认子视图**（`✨ New chat`、`🧹 Compact`）：破坏性操作先说明后果；确认后执行命令并回到菜单。
 - **结果卡片（面板原则，用户需求）**。面板操作若结果是**最终**的，则以一张**新的纯信息卡片**（`✅ Done` / `⚠️ Action failed`，无按钮/输入框）通知：repo/model/permission 选择、重命名、归档、输入/确认提交、恢复、导出，以及所有无子视图的面板命令（help、status、plan、surface status 等）。中间步骤（输入表单、确认提示、选择器）留在面板卡片内并原地更新 —— 需要继续操作的按钮跳转面板，无需再操作的按钮以惰性新卡通知。所有完成路径共享同一个出口（`replyResultCard` + `popToMenu`）：该出口会把面板卡 patch 回菜单根 —— 正是这个 patch 防止 Lark 在回调未携带面板更新时把面板恢复到点击前（第一页）的卡片（用户报告：第二页上的直接结果按钮点击后跳回第一页）。
@@ -278,7 +279,31 @@ harness 的裸 `/plan` 和 `/permission` 形式无法*选择*或*切换*：不�
   - 异步面板**视图**（`sessions` / `session-detail` / `picker`）在 `showPanel` 中先发 `⏳ Loading…` 占位卡（仅 Back），再发真实卡片；
   - 异步面板**操作**（重命名、归档、导出、恢复、选择器的应用步骤、输入/确认/命令 handler）统一走 `runPanelOperation` 封装：先发 `⏳ Operating…` 占位卡（无按钮 —— 禁止误操作），再执行工作，再发结果卡，最后完成退出。这是所有"面板操作中途退回"bug 的根源（用户报告：sessions 界面内的操作没有占位卡）。
 
-### 8.7 新操作的状态机矩阵
+### 8.7 合并后的「智能体」卡片（一个面板按钮，五项设置）
+
+参考：用户需求（"把模型 / 思考深度 / 权限 / 智能体预设 / 计划模式 这几个按钮合并成一个「智能体」按钮，点击后进入新卡片，能够分别设置这些内容"）、用户反馈第 1–5 轮（需要继续操作的按钮跳转面板）。
+
+调色板的 AGENT 组现在只有**一个**按钮 `🤖 Agent`（`/agent`）。它取代的五个命令（`/model`、`/effort`、`/permission`、`/preset`、`/plan`）仍然注册、仍带自己的按钮标签与处理器，但都带 `hiddenFromPanel: true` —— `/help` 列表与所有斜杠命令照常可用，只是调色板不再重复五个都配置同一个智能体的按钮。
+
+点击 `🤖 Agent` 会 PUSH 一个 `agent-settings` 面板视图（属于 transition，因此 `showPanel` 会先自行发布 `⏳ Loading…` 占位卡，再加载目录）。卡片由 `cards/render.ts` 的 `buildAgentSettingsCard` 构建：一个标题（`🤖 Agent`），每项设置一个区块，每个区块用的就是它独立选择器渲染的**同一个**控件 ——
+
+| 区块 | 控件标记 | 预选值 |
+| --- | --- | --- |
+| `**模型**` | `model-pick`（`select_static`，目录来自 `ctx.llm`） | 该聊天当前的 `provider/model` |
+| `**思考深度**` | `effort-pick`（`select_static`，**当前模型**自报的档位） | 已指定的档位，否则模型自身默认档 |
+| `**权限**` | `permission-pick`（`select_static`，`ctx.permissionPresets`） | 会话当前预设 |
+| `**智能体预设**` | `agent-preset-pick`（`select_static`，预设名册） | 存活 agent 实际组装所用的预设 |
+| `**计划模式**` | `plan-mode-set`（`select_static`，只有 `on`/`off`） | 该聊天当前生效的计划状态（pending 也算开启） |
+
+**在这张卡上做选择就留在卡上。** `finishPick`（位于 `panel/actions/PickActions.ts`）是共享的完成出口：当当前视图是 `agent-settings` 时，该选择会 REPLACE 这个视图（用新的当前值重新渲染卡片），而不是回到菜单 —— 合并五项设置的意义正是在同一张卡上依次设置而不必反复进入。结果仍会以惰性结果卡离开面板（`runPanelOperation`）。独立选择器卡片（`/model`、`/permission` 等）保持原有的"回到菜单"出口。
+
+从调色板 PUSH 进入时，卡片带 `⬅ Back` 行；由 `/agent` 斜杠命令行直接播种的卡片是独立状态机（栈深 1），不渲染 Back —— 与其它斜杠命令播种的卡片完全一致。
+
+**缺失服务时每个区块各自响亮降级。** 没有 `ctx.llm` 目录 → `model switching unavailable …`；没有 `ctx.permissionPresets` → `Permission presets are unavailable on this deployment.`；没有预设名册 → `Agent presets are unavailable on this deployment …`；没有 `ctx.planMode` → `Plan mode is unavailable on this deployment.`；当前模型不自报推理档位 → `The current model offers no thinking-depth levels.`（而不是一个点不动的下拉框）。区块标题始终渲染。
+
+两个 action kind（`agent-settings` 打开卡片、`plan-mode-set` 应用计划选择）与其它 Strategy 动作一样走面板 action 注册表（`bridge.handleCardAction` 会把它们路由进 `panelActions.handle`），因此继承 busy-first / patch-first 保证。
+
+### 8.8 新操作的状态机矩阵
 
 | 操作 \ 状态 | none | working | done | stopped | error |
 |---|---|---|---|---|---|
@@ -286,6 +311,8 @@ harness 的裸 `/plan` 和 `/permission` 形式无法*选择*或*切换*：不�
 | command（变更性） | allowed | **refused** "stop first" | allowed | allowed | allowed |
 | resume-session | allowed* | **refused** | allowed* | allowed* | allowed* |
 | panel-page | 无状态翻页重发（无卡片状态转换） | | | | |
+| agent-settings（打开） | allowed | **allowed**（transition —— 只读） | allowed | allowed | allowed |
+| plan-mode-set（选择） | allowed | **refused** | allowed | allowed | allowed |
 
 \* 另有目标运行中 → 拒绝；目标 == 当前 → already-active。所有单元格都 ACK `{}` 并通过 `syncCard` 结束于一致状态（既有规则）；该矩阵在 `tests/bridge.spec.ts` 的 "state machine matrix extension" 中有单元测试。
 

@@ -81,12 +81,24 @@ function panelViewTitle(view: PanelView): string {
       return t('sessions.list.title');
     case 'session-detail':
       return t('sessions.detail.title');
+    case 'agent-settings':
+      return t('panel.agentSettings.title');
     case 'picker':
-      return view.picker === 'repo'
-        ? t('card.repo.title')
-        : view.picker === 'model'
-          ? t('panel.model.title')
-          : t('command.cmd.permission.label');
+      return pickerTitle(view.picker);
+  }
+}
+
+/** Picker-view titles (each picker subtype names itself). */
+function pickerTitle(picker: 'repo' | 'model' | 'permission' | 'agent-preset'): string {
+  switch (picker) {
+    case 'repo':
+      return t('card.repo.title');
+    case 'model':
+      return t('panel.model.title');
+    case 'permission':
+      return t('panel.permission.title');
+    case 'agent-preset':
+      return t('panel.agentPreset.title');
   }
 }
 

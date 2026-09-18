@@ -172,8 +172,6 @@ export const enMessages = {
   'panel.context.noCwd': 'No working directory — pick one with /repo or /cd first',
   'panel.context.noSession': 'No session yet · `{cwd}`',
   'panel.context.session': 'session `{session}` · `{cwd}`',
-  'panel.planMode.plan': '🗺️ Plan mode',
-  'panel.planMode.leave': '🗺️ Leave plan mode',
   'panel.renderFailedView': '⚠️ The panel view could not be rendered — see the bot log.',
   'panel.renderFailedCard': '⚠️ The panel card could not be displayed — see the bot log.',
 
@@ -208,6 +206,22 @@ export const enMessages = {
   'panel.model.effortNone': 'No thinking depth is pinned — the model’s own default applies.',
   'panel.model.effortCurrent': 'Thinking depth: {effort}',
   'panel.action.effortPickInvalid': 'No thinking depth was chosen.',
+  'panel.agentSettings.title': '🤖 Agent',
+  'panel.agentSettings.intro':
+    '**Everything this session’s agent runs with** — model, thinking depth, permission, agent preset, and plan mode on one card; set one and keep going.',
+  'panel.agentSettings.model': '**Model**',
+  'panel.agentSettings.effort': '**Thinking depth**',
+  'panel.agentSettings.permission': '**Permission**',
+  'panel.agentSettings.preset': '**Agent preset**',
+  'panel.agentSettings.planMode': '**Plan mode**',
+  'panel.agentSettings.effortUnavailable': 'The current model offers no thinking-depth levels.',
+  'panel.agentSettings.planPlaceholder': 'Turn plan mode on or off…',
+  'panel.agentSettings.planOn': 'On',
+  'panel.agentSettings.planOff': 'Off',
+  'panel.agentSettings.planCurrent': 'Plan mode: {state}',
+  'panel.agentSettings.planUnavailable': 'Plan mode is unavailable on this deployment.',
+  'panel.action.planModeUnavailable': 'Plan mode is unavailable on this deployment.',
+  'panel.action.planModePickInvalid': 'No plan-mode state was chosen.',
   'panel.category.agent': '🤖 Agent',
   'panel.category.session': '🧩 Session',
   'panel.category.card': '🎨 Card',
@@ -271,6 +285,7 @@ export const enMessages = {
   'command.cmd.feishuStatus.label': '📡 Surface status',
   'command.cmd.schedule.label': '⏰ Reminders',
   'command.cmd.model.label': '🤖 Model',
+  'command.cmd.agent.label': '🤖 Agent',
   'command.cmd.export.label': '📤 Export',
   'command.cmd.sessions.label': '🗂️ Sessions',
   'command.cmd.resume.label': '↩️ Resume session',
@@ -314,6 +329,8 @@ export const enMessages = {
   'command.help.permission': 'Switch the permission preset — sandbox mode + approval policy',
   'command.help.preset': 'Switch the agent preset this chat composes sessions from',
   'command.help.plan': 'Enter or leave plan mode (bare toggles; /plan on|off sets it)',
+  'command.help.agent':
+    'Open the agent card — model, thinking depth, permission, agent preset, and plan mode in one place',
 
   // ── /status text report (the `status` command's text output) ────────────
   'command.status.chat': 'chat: {id}',

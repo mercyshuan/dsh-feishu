@@ -26,6 +26,10 @@ export type PanelView =
   | { readonly kind: 'confirm'; readonly command: 'clear' | 'compact' }
   | { readonly kind: 'sessions'; readonly archived: boolean; readonly query?: string }
   | { readonly kind: 'session-detail'; readonly sessionId: string }
+  /** The merged agent-settings card: model + thinking depth + permission
+   *  preset + agent preset + plan mode on ONE card (the palette's single
+   *  `agent` button pushes it). */
+  | { readonly kind: 'agent-settings' }
   | {
       readonly kind: 'picker';
       readonly picker: 'repo' | 'model' | 'permission' | 'agent-preset';

@@ -5,7 +5,9 @@
 import { describe, expect, it } from 'vitest';
 import { markdownToElements } from '../../src/cards/markdown.js';
 import {
+  type AgentSettingsView,
   assistantText,
+  buildAgentSettingsCard,
   buildApprovalCard,
   buildApprovalDecidedCard,
   buildCard,
@@ -700,20 +702,13 @@ describe('panelPages', () => {
     ]);
   });
 
-  it('closes the FIRST page with the card group (the shipped palette layout)', () => {
-    // The shipped set: agent(5) + session(6, `/stop` joined) + card(1) fill
-    // page 1 exactly, and a category block is never split — so the skill-control
-    // card group ENDS page 1 and page 2 keeps its contents (chat + system).
+  it('packs the ONE agent button with the session/card/chat groups on page 1 (the shipped palette)', () => {
+    // The shipped set: the AGENT group is a SINGLE button (the merged agent
+    // card — model / thinking depth / permission / agent preset / plan mode all
+    // live on that one card), so agent(1) + session(6, `/stop` joined) +
+    // card(1) + chat(1) fit page 1 and page 2 keeps the system group.
     const shipped: PanelCommand[] = [
-      ...(
-        [
-          ['model', '🤖 Model'],
-          ['effort', '🧠 Effort'],
-          ['permission', '🔐 Permission'],
-          ['preset', '🧩 Agent preset'],
-          ['plan', '🗺️ Plan mode'],
-        ] as Array<[string, string]>
-      ).map(([name, buttonLabel]) => ({ name, buttonLabel, category: 'agent' })),
+      { name: 'agent', buttonLabel: '🤖 Agent', category: 'agent' },
       ...(
         [
           ['cancel', '⏹ Stop'],
@@ -737,12 +732,157 @@ describe('panelPages', () => {
       page.filter((e) => e.type === 'button').map((e) => (e.type === 'button' ? e.name : ''));
     const headers = (page: readonly PanelPageEntry[]): string[] =>
       page.filter((e) => e.type === 'header').map((e) => (e.type === 'header' ? e.label : ''));
-    expect(headers(pages[0] ?? [])).toEqual(['agent', 'session', 'card']);
-    expect(names(pages[0] ?? []).at(-1)).toBe('imagecard');
-    expect(names(pages[0] ?? [])).toHaveLength(PANEL_PAGE_SIZE);
-    // Page 2 is unchanged from before the card group existed.
-    expect(headers(pages[1] ?? [])).toEqual(['chat', 'system']);
-    expect(names(pages[1] ?? [])).toHaveLength(10);
+    expect(headers(pages[0] ?? [])).toEqual(['agent', 'session', 'card', 'chat']);
+    expect(names(pages[0] ?? [])).toEqual([
+      'agent',
+      'cancel',
+      'stop',
+      'cd',
+      'repo',
+      'sessions',
+      'new',
+      'imagecard',
+      'group',
+    ]);
+    // Page 2 keeps the system group exactly as before.
+    expect(headers(pages[1] ?? [])).toEqual(['system']);
+    expect(names(pages[1] ?? [])).toHaveLength(9);
+  });
+});
+
+/** A fully-populated merged agent view (every section has a real control). */
+function agentSettingsView(): AgentSettingsView {
+  return {
+    model: {
+      options: [
+        {
+          value: 'deepseek-official/deepseek-v4-flash',
+          label: 'DeepSeek · V4 Flash',
+          current: true,
+        },
+        { value: 'deepseek-official/deepseek-r1', label: 'DeepSeek · R1', current: false },
+      ],
+      current: 'deepseek-official/deepseek-v4-flash',
+      notice: undefined,
+    },
+    reasoning: {
+      efforts: [
+        { id: 'off', name: 'Off' },
+        { id: 'high', name: 'High' },
+      ],
+      current: 'high',
+      modelDefault: 'off',
+    },
+    permission: {
+      presets: [
+        { name: 'workspace-write', label: 'Workspace write', description: 'write', current: true },
+        { name: 'read-only', label: 'Read only', description: 'read', current: false },
+      ],
+      notice: undefined,
+    },
+    preset: {
+      presets: [
+        { id: 'default', label: 'Default', description: undefined, current: true },
+        { id: 'reviewer', label: 'Reviewer', description: 'Reviews only.', current: false },
+      ],
+      notice: undefined,
+    },
+    plan: { active: false, notice: undefined },
+  };
+}
+
+describe('buildAgentSettingsCard', () => {
+  /** Every `select_static` marker kind on a card, in card order. */
+  const selectKinds = (elements: readonly CardElement[]): (string | undefined)[] =>
+    elements.flatMap((el) =>
+      el.tag === 'action'
+        ? el.actions.filter((a) => a.tag === 'select_static').map((a) => a.value?.kind)
+        : [],
+    );
+
+  it('stacks all five settings on ONE card, each with its own control', () => {
+    const card = buildAgentSettingsCard(agentSettingsView());
+    expect(card.header?.title.content).toBe('🤖 Agent');
+    const markdowns = card.elements.flatMap((el) => (el.tag === 'markdown' ? [el.content] : []));
+    const labels = [
+      '**Model**',
+      '**Thinking depth**',
+      '**Permission**',
+      '**Agent preset**',
+      '**Plan mode**',
+    ];
+    const positions = labels.map((label) => markdowns.indexOf(label));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    // Each section owns its control, in card order.
+    expect(selectKinds(card.elements)).toEqual([
+      'model-pick',
+      'effort-pick',
+      'permission-pick',
+      'agent-preset-pick',
+      'plan-mode-set',
+    ]);
+    // No Back row: the CALLER appends it when the card has a parent.
+    expect(JSON.stringify(card.elements)).not.toContain('⬅ Back');
+  });
+
+  it('preselects each dropdown with the session’s current value', () => {
+    const card = buildAgentSettingsCard(agentSettingsView());
+    const selects = card.elements.flatMap((el) =>
+      el.tag === 'action'
+        ? el.actions.filter((a): a is SelectAction => a.tag === 'select_static')
+        : [],
+    );
+    expect(selects.map((select) => select.initial_option)).toEqual([
+      'deepseek-official/deepseek-v4-flash',
+      'high',
+      'workspace-write',
+      'default',
+      'off',
+    ]);
+    // The plan select offers exactly on/off.
+    expect(selects.at(-1)?.options.map((option) => option.value)).toEqual(['on', 'off']);
+  });
+
+  it('the plan section preselects ON while plan mode is active', () => {
+    const view = agentSettingsView();
+    const card = buildAgentSettingsCard({ ...view, plan: { active: true, notice: undefined } });
+    const planSelect = card.elements
+      .flatMap((el) => (el.tag === 'action' ? el.actions : []))
+      .find(
+        (action): action is SelectAction =>
+          action.tag === 'select_static' && action.value?.kind === 'plan-mode-set',
+      );
+    expect(planSelect?.initial_option).toBe('on');
+    expect(JSON.stringify(card.elements)).toContain('Plan mode: On');
+  });
+
+  it('degrades a section to its loud notice when its service is missing', () => {
+    const view = agentSettingsView();
+    const notice = { title: 'x', markdown: 'unavailable here.' };
+    const card = buildAgentSettingsCard({
+      ...view,
+      model: { options: [], current: undefined, notice },
+      permission: { presets: [], notice },
+      preset: { presets: [], notice },
+      plan: { active: false, notice },
+    });
+    // Only the thinking-depth dropdown survives.
+    expect(selectKinds(card.elements)).toEqual(['effort-pick']);
+    // Each degraded section still shows its line.
+    expect(JSON.stringify(card.elements)).toContain('unavailable here.');
+  });
+
+  it('explains an empty thinking-depth list instead of rendering a dead dropdown', () => {
+    const view = agentSettingsView();
+    const card = buildAgentSettingsCard({
+      ...view,
+      reasoning: { efforts: [], current: undefined, modelDefault: undefined },
+    });
+    expect(selectKinds(card.elements)).not.toContain('effort-pick');
+    expect(JSON.stringify(card.elements)).toContain(
+      'The current model offers no thinking-depth levels.',
+    );
   });
 });
 

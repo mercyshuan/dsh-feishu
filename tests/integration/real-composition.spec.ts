@@ -2601,10 +2601,14 @@ describe.skipIf(!integrationReady)('real-composition integration', () => {
             ? el.actions.filter((a) => a.tag === 'button').map((a) => a.text.content)
             : [],
         ) ?? [];
-      expect(labels).toContain('🗺️ Plan mode');
-      expect(labels).toContain('🤖 Model');
+      // The agent group is ONE button (the merged agent card — model,
+      // thinking depth, permission, agent preset, plan mode all live there);
+      // page 2 carries the system group.
+      expect(labels).toContain('🤖 Agent');
       expect(labels).toContain('📤 Export');
-      expect(labels).toContain('🔐 Permission');
+      expect(labels).not.toContain('🤖 Model');
+      expect(labels).not.toContain('🔐 Permission');
+      expect(labels).not.toContain('🗺️ Plan mode');
     } catch (error) {
       throw new Error(
         `${String(error)}\n--- dsh stderr ---\n${stderr}\n--- dsh stdout ---\n${stdout}`,
