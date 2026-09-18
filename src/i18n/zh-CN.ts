@@ -480,7 +480,7 @@ export const zhMessages: Record<MessageKey, string> = {
   'command.cmd.stop.label': '🛑 全部停止',
   'command.help.stop': '停掉所有会话正在跑的回合，然后执行配置里名为 `stop` 的清理脚本',
   'command.stop.noSessions': '没有正在运行的会话来停止。',
-  'command.stop.cancelled': '🛑 已停止 {count} 个活跃会话（其中 {running} 个正在跑回合）。',
+  'command.stop.cancelled': '🛑 已停止 {count} 个正在运行的会话。',
   'command.stop.noScript':
     '⚠️ slashCommands 里没有名为 `stop` 的条目 —— 只取消了进程内回合，未执行清理脚本。',
   'command.stop.noScriptIdle':

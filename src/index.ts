@@ -684,6 +684,14 @@ export function apply(ctx: Context, config: Config, deps: ApplyDeps = {}): void 
   // agents created afterwards (both defects reported in #62).
   const agentStore: AgentStore = {
     get: (sessionId) => ctx.get('agents')?.get(sessionId as unknown as SessionId),
+    // `/stop` reads the live registry instead of the session corpus: each agent
+    // carries its own phase-derived `status` ('idle' | 'running'), so "which
+    // conversations are still working" is an in-memory question. The corpus
+    // listing (`listSessions`) folds a title per session by replaying its log —
+    // 276 sessions / ~129MB took ~15s, which made the panic button look dead.
+    // `roots()` = top-level agents (one per conversation), children excluded:
+    // cancelling a conversation's turn takes its delegated work with it.
+    roots: () => ctx.get('agents')?.roots(),
     resume: async (sessionId) => {
       const agents = ctx.get('agents');
       if (agents === undefined) {
@@ -790,16 +798,6 @@ export function apply(ctx: Context, config: Config, deps: ApplyDeps = {}): void 
     ...(config.contextMerge !== undefined ? { contextMerge: config.contextMerge } : {}),
     executeCommand: (agent, line) => executeDshCommand(ctx, agent, line),
     listSessions: () => listSessions(ctx),
-    // `/stop`'s fast path: the in-memory session store (`ctx.sessions`), NOT the
-    // corpus listing. `listSessions` folds a title per session by replaying its
-    // log — 276 stored sessions / ~129MB took ~15s, which made the panic button
-    // look dead. Both seams describe the SAME live set (`listSessions` marks
-    // `live: true` exactly for what this store holds), so `/stop` loses nothing.
-    listLiveSessionIds: () =>
-      ctx
-        .get('sessions')
-        ?.list()
-        .map((session) => String(session.id)),
     readSession: (sessionId) => {
       const sessionQuery = ctx.get('sessionQuery') as SessionQueryLike | undefined;
       if (sessionQuery === undefined) {

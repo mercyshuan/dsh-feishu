@@ -11,10 +11,12 @@
  * allowlist is refused.
  *
  * `/stop` is the built-in case: it is a SURFACE command, so the bridge
- * intercepts it before any dsh passthrough, cancels every live session, and
- * then consults this allowlist for an entry named `stop` — the deployment's
- * hard-kill cleanup script (see {@link parseSlashArgs} for how the line's own
- * trailing text reaches that script).
+ * intercepts it before any dsh passthrough, cancels every RUNNING conversation
+ * (selected from the in-memory agent registry by each agent's own `status`, so
+ * no stored history is read), and then consults this allowlist for an entry
+ * named `stop` — the deployment's hard-kill cleanup script (see
+ * {@link parseSlashArgs} for how the line's own trailing text reaches that
+ * script).
  *
  * @module @dsh-feishu/dsh-feishu/slash-commands
  */

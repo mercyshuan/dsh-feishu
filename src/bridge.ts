@@ -209,6 +209,17 @@ export interface AgentStore {
   /** The live agent for a session, or `undefined`. */
   get(sessionId: string): Agent | undefined;
   /**
+   * Every live TOP-LEVEL agent — one per conversation — straight from the
+   * in-memory registry, with each agent's own {@link Agent.status}
+   * (`'idle' | 'running'`). `undefined` when the host exposes no registry.
+   *
+   * This is `/stop`'s ONLY source: `status` is the agent loop's phase-derived
+   * lifecycle property (the same signal `/cancel` reads), so "which
+   * conversations are still working" is answerable without touching a single
+   * stored session.
+   */
+  roots?(): readonly Agent[] | undefined;
+  /**
    * Resume an agent on a persisted session. The session map is durable, so a
    * mapped session may exist on disk without a live agent (daemon restart);
    * resuming it keeps the chat's history instead of colliding on a fresh
@@ -510,20 +521,11 @@ export interface BridgeOptions {
    * with folded titles). Absent, the surface degrades to a
    * bound-sessions-only listing.
    *
-   * NOT for `/stop`: folding titles replays every stored session log
-   * (`ctx.sessionQuery.readTitleSnapshots`), which on a corpus of a few
-   * hundred sessions takes ~15s — a panic stop must never wait on it. Use
-   * {@link BridgeOptions.listLiveSessionIds} there.
+   * NOT for `/stop`: folding a title replays the session's log, so this walks
+   * stored history and takes ~15s on a few hundred sessions. `/stop` reads the
+   * in-memory agent registry instead ({@link AgentStore.roots}).
    */
   readonly listSessions?: () => Promise<readonly SessionListRow[] | undefined>;
-  /**
-   * Every LIVE session id from the host's in-memory session store
-   * (`ctx.sessions.list()`) — `/stop`'s fast path. Synchronous and I/O-free,
-   * so the panic button cancels before it does anything that can block.
-   * Absent or `undefined` (older host without the `sessions` service), `/stop`
-   * falls back to {@link BridgeOptions.listSessions} under a hard time budget.
-   */
-  readonly listLiveSessionIds?: () => readonly string[] | undefined;
   /**
    * Read one complete session log for `/export` (structural subset of
    * `ctx.sessionQuery.readSession`). Absent, `/export` reports the service
@@ -747,42 +749,6 @@ interface QueueCardEntry {
  */
 async function listProjects(roots: readonly string[]): Promise<ProjectInfo[]> {
   return scanMultipleProjects(roots);
-}
-
-/**
- * How long `/stop` may spend on the corpus-listing FALLBACK before it gives up
- * and acts on what the in-memory sources already knew.
- *
- * The listing folds a title for every stored session (it replays each log), so
- * on a real corpus it can take tens of seconds; a panic button that waits for
- * it is not a panic button. Only reached when the host has no live-session seam.
- */
-const STOP_LISTING_BUDGET_MS = 2_000;
-
-/**
- * Resolve `promise`, or `undefined` once `ms` elapses first.
- *
- * The losing promise keeps running (it is deliberately NOT cancelled: a
- * `sessionQuery` listing owns shared state) and its eventual rejection is
- * swallowed here — the caller already reported the degradation, and an
- * unhandled rejection would be noise.
- * @param promise - the operation to bound.
- * @param ms - the budget in milliseconds.
- * @returns the value, or `undefined` when the budget won.
- */
-async function withBudget<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  promise.catch(() => {});
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<undefined>((resolve) => {
-        timer = setTimeout(() => resolve(undefined), ms);
-      }),
-    ]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
 }
 
 export class Bridge {
@@ -1257,30 +1223,31 @@ export class Bridge {
   }
 
   /**
-   * The `/stop` action: cancel EVERY live session's current turn, then run the
-   * allowlisted `stop` cleanup script (when configured) so a process tree the
-   * graceful cancel missed is hard-killed.
+   * The `/stop` action: cancel the current turn of every RUNNING conversation,
+   * then run the allowlisted `stop` cleanup script (when configured) so a
+   * process tree the graceful cancel missed is hard-killed.
    *
    * Session cancellation must happen HERE — sessions are in-process objects and
    * an external script cannot reach them; the script only cleans up after them.
    * The returned text says which half ran and which half did not, so an
    * unconfigured cleanup script is visible instead of silently skipped.
    *
-   * The cancel half is deliberately I/O-free (in-memory session sources only),
-   * so the panic button answers immediately; see {@link Bridge.cancelAllSessions}.
+   * The cancel half reads the in-memory agent registry only (no stored history,
+   * no await), so the panic button answers immediately; see
+   * {@link Bridge.cancelAllSessions}.
    * @param invocation - the `/stop` invocation (its extra args go to the script).
    * @returns the summary reply for the chat.
    */
   async stopEverything(invocation: CommandInvocation): Promise<CommandResult> {
     const startedAt = Date.now();
-    const { stopped, running } = await this.cancelAllSessions();
+    const stopped = this.cancelAllSessions();
     this.options.logger.info(
-      `stop: every-session stop from chat ${invocation.chatId} — ${stopped} live session(s), ${running} mid-turn, ${Date.now() - startedAt}ms`,
+      `stop: every-session stop from chat ${invocation.chatId} — ${stopped} running session(s), ${Date.now() - startedAt}ms`,
     );
     const lines = [
       stopped === 0
         ? t('command.stop.noSessions')
-        : t('command.stop.cancelled', { count: stopped, running }),
+        : t('command.stop.cancelled', { count: stopped }),
     ];
     if (this.slashRunner.has('stop')) {
       const outcome = this.slashRunner.run(
@@ -1302,100 +1269,47 @@ export class Bridge {
   }
 
   /**
-   * Every session that currently has a live agent: the chat bindings plus the
-   * host's live-session seam (a session can be live without a chat binding —
-   * it was resumed from the desktop surface, or its chat was rebound).
+   * Cancel the current turn of every RUNNING conversation (the `/stop` core).
    *
-   * The seam is SYNCHRONOUS and in-memory on purpose: `/stop` is a panic
-   * button, and the corpus listing (which folds titles for every stored
-   * session) is far too slow to sit on its critical path.
-   * @param immediate - the host's live ids, already read (see
-   *   {@link BridgeOptions.listLiveSessionIds}).
-   * @returns the deduplicated session ids.
-   */
-  private liveSessionIds(immediate: readonly string[]): string[] {
-    const ids = new Set<string>(this.boundSessionIds());
-    for (const sessionId of immediate) ids.add(sessionId);
-    return [...ids];
-  }
-
-  /** The session ids currently bound to a chat (in-memory map, no I/O). */
-  private boundSessionIds(): string[] {
-    const ids: string[] = [];
-    for (const chat of this.options.sessionMap.chats()) {
-      const sessionId = this.options.sessionMap.get(chat);
-      if (sessionId !== undefined) ids.push(sessionId);
-    }
-    return ids;
-  }
-
-  /**
-   * Live session ids through the corpus listing — the FALLBACK for a host with
-   * no in-memory seam, capped by {@link STOP_LISTING_BUDGET_MS} so a slow (or
-   * wedged) corpus cannot delay the stop. Cancellation itself never depends on
-   * this: the bound chats are already cancelled by the time it runs.
-   * @returns the listed live ids, or `[]` when the listing failed or ran out
-   *   of budget.
-   */
-  private async listedLiveSessionIds(): Promise<string[]> {
-    if (this.options.listSessions === undefined) return [];
-    try {
-      const rows = await withBudget(this.options.listSessions(), STOP_LISTING_BUDGET_MS);
-      if (rows === undefined) {
-        this.options.logger.warn(
-          `stop: live session listing exceeded ${STOP_LISTING_BUDGET_MS}ms; stopped the bound chats only`,
-        );
-        return [];
-      }
-      return (rows ?? []).filter((row) => row.live).map((row) => row.sessionId);
-    } catch (error: unknown) {
-      // Degrade to the bound chats: the stop must still happen.
-      this.options.logger.warn(`stop: live session listing failed: ${String(error)}`);
-      return [];
-    }
-  }
-
-  /**
-   * Cancel the current turn of every live session (the `/stop` core). Cancel is
-   * a no-op on an idle agent, so the count reports targets, not turns actually
-   * interrupted.
+   * The selection IS the status property: each live top-level agent reports
+   * {@link Agent.status} (`'idle' | 'running'`, the agent loop's phase-derived
+   * lifecycle — the same signal `/cancel` reads), so "which conversations are
+   * still working" needs no history walk at all. This matters because folding
+   * titles over the corpus replays every stored log (~15s on a 276-session
+   * deployment), which is exactly what made this panic button look dead.
    *
-   * ORDER MATTERS (the reported "/stop 反应很慢"): the in-memory sources are
-   * consumed FIRST, before any await, so the stop has already landed by the
-   * time anything slow is attempted — and only a host without the in-memory
-   * seam ever touches the corpus listing, under a time budget.
-   * @returns how many live sessions were targeted and how many were mid-turn.
+   * A recency window ("sessions started in the last 24h") is deliberately NOT
+   * used instead: liveness and recency are different things. A chat keeps ONE
+   * session across days — this deployment's group chat was still running turns
+   * on a session created 22.5h earlier — so an age filter would silently skip
+   * the very conversation the operator is trying to stop.
+   * @returns how many running conversations were cancelled.
    */
-  private async cancelAllSessions(): Promise<{ stopped: number; running: number }> {
-    const seen = new Set<string>();
-    let stopped = 0;
-    let running = 0;
-    const cancel = (sessionId: string): void => {
-      if (seen.has(sessionId)) return;
-      seen.add(sessionId);
-      const agent = this.options.agentStore.get(sessionId);
-      if (agent === undefined) return;
-      if (agent.status === 'running') running += 1;
-      agent.cancel({ kind: 'user' }, { keepInbox: true });
-      stopped += 1;
-      this.options.logger.debug(
-        `stop: cancelled session ${sessionId} (chat ${
-          this.options.sessionMap.chatFor(sessionId) ?? 'unbound'
-        }, status ${agent.status})`,
+  private cancelAllSessions(): number {
+    const agents = this.options.agentStore.roots?.();
+    if (agents === undefined) {
+      // Misconfiguration fails loud. Never silently widen the search into
+      // stored history to compensate.
+      this.options.logger.warn(
+        'stop: the host exposes no live agent registry; no conversation could be checked for a running turn',
       );
-    };
-    // 1. The in-memory sources (chat bindings + the host's live set), consumed
-    //    BEFORE any await so the stop has already landed when we return.
-    const immediate = this.options.listLiveSessionIds?.();
-    if (immediate !== undefined) {
-      for (const sessionId of this.liveSessionIds(immediate)) cancel(sessionId);
-      return { stopped, running };
+      return 0;
     }
-    // 2. Fallback only: chat bindings (still synchronous), then the budgeted
-    //    corpus listing for unbound sessions.
-    for (const sessionId of this.boundSessionIds()) cancel(sessionId);
-    for (const sessionId of await this.listedLiveSessionIds()) cancel(sessionId);
-    return { stopped, running };
+    let cancelled = 0;
+    for (const agent of agents) {
+      // Only a RUNNING conversation owns a turn to cancel; `cancel` on an idle
+      // one is a documented no-op, so selecting by status loses nothing.
+      if (agent.status !== 'running') continue;
+      const sessionId = String(agent.session.id);
+      agent.cancel({ kind: 'user' }, { keepInbox: true });
+      cancelled += 1;
+      this.options.logger.debug(
+        `stop: cancelled running session ${sessionId} (chat ${
+          this.options.sessionMap.chatFor(sessionId) ?? 'unbound'
+        })`,
+      );
+    }
+    return cancelled;
   }
 
   /**

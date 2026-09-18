@@ -504,8 +504,8 @@ export const enMessages = {
   'command.cmd.stop.label': '🛑 Stop everything',
   'command.help.stop':
     'Stop every running turn across all chats, then run the configured `stop` cleanup script',
-  'command.stop.noSessions': 'No live session to stop.',
-  'command.stop.cancelled': '🛑 Stopped {count} live session(s) ({running} mid-turn).',
+  'command.stop.noSessions': 'No running conversation to stop.',
+  'command.stop.cancelled': '🛑 Stopped {count} running conversation(s).',
   'command.stop.noScript':
     '⚠️ No `stop` entry in slashCommands — only the in-process turns were cancelled.',
   'command.stop.noScriptIdle':
