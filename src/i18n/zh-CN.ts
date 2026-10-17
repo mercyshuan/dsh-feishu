@@ -50,6 +50,7 @@ export const zhMessages: Record<MessageKey, string> = {
   'card.repo.pickerIntro':
     '**选择项目目录** —— 从下拉列表中选择，或使用 `/cd <路径>` 指定自定义目录。',
   'card.repo.pickedBody': '✅ 工作目录已设置为\n\n`{path}`',
+  'card.repo.currentNote': '当前工作区：{path}',
 
   // ── Status markers on the streaming card ────────────────────────────────
   'card.status.line.working': '**… 处理中**',
@@ -468,6 +469,10 @@ export const zhMessages: Record<MessageKey, string> = {
   'cardRun.failed': '🚫 卡片命令「{name}」启动失败：{detail}',
   'command.error.cardCommandUnavailable':
     '🚫 本部署没有启用卡片命令通道（缺少 cardCommands runner）。',
+
+  // ── Bot custom-menu clicks (the menuCommands seam) ──────────────────────
+  // 菜单事件不带 chat_id，这条提示是"顺手把操作人的会话 id 学回来"时发的第一句话。
+  'botMenu.locating': '🎛️ 收到菜单点击，正在准备…',
 
   // ── Typed slash lines bound to local commands (the slashCommands seam) ───
   'slashRun.started': '▶️ `/{name}` 已启动，pid {pid}。日志：{log}',

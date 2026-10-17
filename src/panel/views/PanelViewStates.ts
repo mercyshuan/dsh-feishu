@@ -148,14 +148,16 @@ export class SessionDetailViewState implements PanelViewState {
 export class RepoPickerViewState implements PanelViewState {
   readonly key = 'picker:repo';
   readonly asyncData = true;
-  async render(ctx: PanelViewContext, _chatId: string, view: PanelView): Promise<CardJson> {
+  async render(ctx: PanelViewContext, chatId: string, view: PanelView): Promise<CardJson> {
     // A typed `/repo <path>` passes a custom root to scan; bare uses the
     // deployment's default repoRoots. Both open the picker card.
     const roots =
       view.kind === 'picker' && view.picker === 'repo' ? (view.roots ?? ctx.repoRoots) : [];
     const page = view.kind === 'picker' && view.picker === 'repo' ? view.page : 0;
     const projects = await ctx.listProjects(roots);
-    return buildRepoPickerCard(projects, roots, page);
+    // Remember the chat's pinned working directory across picker renders:
+    // the dropdown preselects it instead of falling back to the placeholder.
+    return buildRepoPickerCard(projects, roots, page, ctx.currentCwd(chatId));
   }
 }
 

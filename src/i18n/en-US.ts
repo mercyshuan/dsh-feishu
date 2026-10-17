@@ -50,6 +50,7 @@ export const enMessages = {
   'card.repo.pickerIntro':
     '**Pick a project directory** — choose one from the dropdown, or use `/cd <path>` for a custom directory.',
   'card.repo.pickedBody': '✅ Working directory set to\n\n`{path}`',
+  'card.repo.currentNote': 'current workspace: {path}',
 
   // ── Status markers on the streaming card + panel core buttons ───────────
   'card.status.line.working': '**… working**',
@@ -492,6 +493,11 @@ export const enMessages = {
   'cardRun.failed': '🚫 Card command "{name}" could not start: {detail}',
   'command.error.cardCommandUnavailable':
     '🚫 The card-command seam is not available in this deployment (no cardCommands runner).',
+
+  // ── Bot custom-menu clicks (the menuCommands seam) ──────────────────────
+  // A menu event carries no chat id; this line doubles as the message whose
+  // response teaches the surface the operator's conversation.
+  'botMenu.locating': '🎛️ Menu click received — getting things ready…',
 
   // ── Typed slash lines bound to local commands (the slashCommands seam) ───
   'slashRun.started': '▶️ `/{name}` started as pid {pid}. Log: {log}',

@@ -239,6 +239,54 @@ export function repoOptionLabel(project: ProjectInfo, roots: readonly string[]):
 }
 
 /**
+ * One picker row: the path to pin plus the label to show. `current` marks the
+ * chat's already-chosen working directory (remembered across cards) so the
+ * dropdown shows it preselected and the row list marks it with ★.
+ */
+interface RepoChoice {
+  readonly path: string;
+  readonly label: string;
+  readonly current: boolean;
+}
+
+/**
+ * Canonical form used only for equality: separators unified and the trailing
+ * slash dropped (Windows additionally compares case-insensitively, as the
+ * same directory may be pinned with a differently-cased path).
+ */
+function normalizeDirPath(value: string): string {
+  const unified = process.platform === 'win32' ? value.replace(/\\/g, '/') : value;
+  const trimmed = unified.replace(/\/+$/, '');
+  return process.platform === 'win32' ? trimmed.toLowerCase() : trimmed;
+}
+
+/**
+ * The picker rows, with the pinned working directory remembered: the scanned
+ * project matching it is flagged as current, and a pinned path the scan did
+ * NOT return (a `/cd` outside repoRoots, or a root that changed) is prepended
+ * as its own row — otherwise the remembered choice would vanish from the
+ * dropdown on re-open (the bug this function fixes).
+ */
+function repoChoices(
+  projects: readonly ProjectInfo[],
+  roots: readonly string[],
+  currentPath: string | undefined,
+): readonly RepoChoice[] {
+  const choices: RepoChoice[] = projects.map((project) => ({
+    path: project.path,
+    label: repoOptionLabel(project, roots),
+    current: false,
+  }));
+  if (currentPath === undefined || currentPath === '') return choices;
+  const target = normalizeDirPath(currentPath);
+  const index = choices.findIndex((choice) => normalizeDirPath(choice.path) === target);
+  if (index === -1) {
+    return [{ path: currentPath, label: currentPath, current: true }, ...choices];
+  }
+  return choices.map((choice, at) => (at === index ? { ...choice, current: true } : choice));
+}
+
+/**
  * Build the interactive repo-picker card. With up to
  * {@link REPO_SELECT_MAX_OPTIONS} projects, selection is a `select_static`
  * dropdown placed DIRECTLY inside an `action` container (botmux pattern:
@@ -247,16 +295,27 @@ export function repoOptionLabel(project: ProjectInfo, roots: readonly string[]):
  * callback whose `option` field carries the chosen value; the select's own
  * `value` carries the `{kind:'repo-pick'}` marker). Beyond the cap, the card
  * falls back to numbered project buttons with pagination.
+ *
+ * The chat's remembered working directory (its pinned cwd) is preselected in
+ * the dropdown and marked with ★ in both layouts, so the picker always shows
+ * what is already chosen instead of a bare placeholder.
  * @param projects - candidate projects (recursively scanned).
  * @param roots - repoRoots, used to show relative paths in labels.
  * @param page - zero-based page index (button fallback only).
+ * @param currentPath - the chat's pinned working directory, or `undefined`
+ *   when none was chosen yet (remembered memory of a previous pick).
  * @returns Feishu interactive card JSON (v1 layout).
  */
 export function buildRepoPickerCard(
   projects: readonly ProjectInfo[],
   roots: readonly string[],
   page = 0,
+  currentPath?: string,
 ): CardJson {
+  const choices = repoChoices(projects, roots, currentPath);
+  const current = choices.find((choice) => choice.current);
+  const labelOf = (choice: RepoChoice, index: number): string =>
+    `${index + 1}. ${choice.current ? '★ ' : ''}${choice.label}`;
   const elements: CardElement[] = [
     {
       tag: 'markdown',
@@ -264,7 +323,7 @@ export function buildRepoPickerCard(
     },
     { tag: 'hr' },
   ];
-  if (projects.length > 0 && projects.length <= REPO_SELECT_MAX_OPTIONS) {
+  if (choices.length > 0 && choices.length <= REPO_SELECT_MAX_OPTIONS) {
     // Dropdown primary (botmux `repo_switch` pattern): the select lives
     // inside an `action` container, not a `form`.
     elements.push({
@@ -273,33 +332,34 @@ export function buildRepoPickerCard(
         {
           tag: 'select_static',
           placeholder: { tag: 'plain_text', content: t('card.repo.placeholder') },
-          options: projects.map((project, index) => ({
+          ...(current !== undefined ? { initial_option: current.path } : {}),
+          options: choices.map((choice, index) => ({
             text: {
               tag: 'plain_text',
-              content: `${index + 1}. ${repoOptionLabel(project, roots)}`,
+              content: labelOf(choice, index),
             },
-            value: project.path,
+            value: choice.path,
           })),
           value: { kind: 'repo-pick' },
         },
       ],
     });
-  } else if (projects.length > REPO_SELECT_MAX_OPTIONS) {
+  } else if (choices.length > REPO_SELECT_MAX_OPTIONS) {
     const start = page * REPO_PAGE_SIZE;
-    const pageProjects = projects.slice(start, start + REPO_PAGE_SIZE);
-    const buttons = pageProjects.map((project, index) => ({
+    const pageChoices = choices.slice(start, start + REPO_PAGE_SIZE);
+    const buttons = pageChoices.map((choice, index) => ({
       tag: 'button' as const,
       text: {
         tag: 'plain_text' as const,
-        content: `${start + index + 1}. ${repoOptionLabel(project, roots)}`,
+        content: labelOf(choice, start + index),
       },
-      value: { kind: 'repo-pick', path: project.path },
+      value: { kind: 'repo-pick', path: choice.path },
     }));
     if (buttons.length > 0) {
       elements.push({ tag: 'action', actions: buttons });
     }
     const hasPrev = page > 0;
-    const hasNext = start + pageProjects.length < projects.length;
+    const hasNext = start + pageChoices.length < choices.length;
     if (hasPrev || hasNext) {
       const nav: Array<{
         tag: 'button';
@@ -321,6 +381,12 @@ export function buildRepoPickerCard(
         });
       elements.push({ tag: 'action', actions: nav });
     }
+  }
+  if (currentPath !== undefined && currentPath !== '') {
+    elements.push({
+      tag: 'note',
+      elements: [{ tag: 'plain_text', content: t('card.repo.currentNote', { path: currentPath }) }],
+    });
   }
   return {
     config: { wide_screen_mode: true },

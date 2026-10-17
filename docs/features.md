@@ -15,6 +15,7 @@ Feature list for dsh-feishu. ✅ = shipped, 📋 = planned
 | Reaction ack | Received message → GoGoGo emoji; turn end → DONE/ERROR | Two-stage reaction, configurable, can be disabled | ✅ |
 | Scheduled reminders | The agent can schedule reminders via dsh-schedule; `/schedule` lists them | ⏰ Reminder card when a scheduled prompt fires | ✅ |
 | Allowlists | `allowedChats` / `allowedUsers` gate who can talk to the bot | Env/config-driven, applied to messages and card actions | ✅ |
+| Bot custom menu | A bot custom-menu item whose response action is 推送事件 (push event) runs the `cardCommands` entry mapped to its `event_key`, in the operator's p2p chat | Click runs the mapped command (same allowlist/lock/log as a card button); an unmapped key is logged, never guessed | ✅ |
 | Session-log export | `/export` sends the chat's session log as a downloadable file message | File message with markdown transcript | ✅ |
 | Diagnostics | `/feishu-status` shows a diagnostic card (connection state, sessions, last inbound) | Read-only status card, usable mid-turn | ✅ |
 | Inbound attachments | Images/files the user sends are saved to the workspace as plain files and the agent reads them by path; a bare file/image message registers as pending — a receipt card posts and the agent waits for your instruction | 📎 File received receipt (counts pending files); follow-up text makes the agent work on them | ✅ |

@@ -276,9 +276,10 @@ message, card, session, or chat through the pipeline:
 | `actions` | `panel action <kind>: transition/refused/operation` | Panel gate and lifecycle decisions |
 
 A full turn reads top to bottom like: `inbound message m1 -> turn` →
-`streaming beginTurn` → `streaming event assistant/chunk` →
-`streaming tool/call` → `transport updateCard <card-id>` →
-`streaming event turn/end` → `streaming finalize <status>`. When
+`streaming beginTurn` → `streaming assistant-stream start` →
+`streaming assistant-stream chunk` → `streaming tool/call` →
+`transport updateCard <card-id>` → `streaming event turn/end` →
+`streaming finalize <status>`. When
 something misbehaves, grep for the message/card/session id and the
 discontinuity in the chain marks where the surface lost it.
 

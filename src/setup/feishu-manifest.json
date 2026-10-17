@@ -1,5 +1,5 @@
 {
-  "appEvents": ["im.message.receive_v1"],
+  "appEvents": ["im.message.receive_v1", "application.bot.menu_v6"],
   "cardCallbacks": ["card.action.trigger"],
   "longConnectionMode": 4,
   "scopes": [

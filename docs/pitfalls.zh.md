@@ -313,16 +313,24 @@ harness 沙箱（以及本 checkout 的环境）有一些特定规则：
 ## 助手流式增量已改走进程内瞬时帧（dsh 0.1.5）
 
 - dsh 0.1.5 的 core **不再**把 assistant 的增量作为落库事件 `assistant/chunk`
-  追加，改由 agent loop 发布**进程内瞬时帧** `agent/assistant-stream`
-  （`dsh-agent-loop`：`dispatch.emit('agent/assistant-stream', { frame })`，其中
-  `frame.chunk` 就是过去那条落库事件携带的 `StreamChunk`）。只订阅
-  `session/event` 的表面在 0.1.5 下**收不到任何流式增量**：没有
+  追加（该类型已从 `SessionEvent` 中移除，也不再有 core 追加它），改由 agent
+  loop 发布**进程内瞬时帧** `agent/assistant-stream`
+  （`dsh-agent-loop`：`dispatch.emit('agent/assistant-stream', { frame })`）。
+  只订阅 `session/event` 的表面在 0.1.5 下**收不到任何流式增量**：没有
   `reasoning-delta`，思考行就从不建立，折叠卡片退化为 `collapseThought` 的
   末行回退（工具轨迹）——用户看到的是"思考内容没了、只剩工具的简短记录"，
   正文也不再逐字，而是一次性出现。
-- 本 bundle 现在**同时**订阅两条通道：落库事件（0.1.2）与 dispatch 帧
-  （0.1.5），把帧里的 `chunk` 折回**同一条**控制器分支。两者靠落库事件携带的
-  已提交 `seq` 区分，因此即便某个 core 两条都发也不会把同一段文本折叠两次。
+- 帧是**三态**发布（`start` / `chunk` / `end`），**不是**裸 chunk，并携带
+  attempt id 与单调的 `revision`（"replacement restarts at 1"，替换后从 1 重新
+  计）。只折 `frame.chunk` 会丢掉全部边界：连续多个 attempt 的思考会落进**同一
+  个**思考行；被替换生命周期重放的旧 `revision` 帧会把同一段文本再追加一次。
+  必须转发**整个帧**——`start` 开启新一轮发布并重置 revision 基线（拿它去和上一
+  条流的 revision 比较，会把整个新 attempt 连同其后所有增量一起丢掉）、同
+  attempt 的旧 revision 被丢弃、`end` 结算该 attempt 的思考行、新一轮开始时忘掉
+  上一轮的基线，以免已结束回合的数据压掉下一轮。
+- 失败/重试/取消的 attempt 落库的是 `assistant/attempt` 而非
+  `assistant/message`：它流过的内容用户已经看见，但没有提交任何 surface
+  message，因此**不得**覆盖卡片上的实时正文——只结算敞开的思考行。
 - 这种退化是**静默**的：不报错、正文照出，只是少了思考行。核心升级后请主动
   复核宿主事件契约，别等用户来报。
 

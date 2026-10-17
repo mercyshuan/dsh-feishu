@@ -46,6 +46,7 @@ import {
   type QueueItemStatus,
 } from './cards/render.js';
 import {
+  type AssistantStreamFrameLike,
   StreamingCardController,
   type StreamingCardHost,
 } from './cards/StreamingCardController.js';
@@ -71,6 +72,7 @@ import {
 } from './context-merge.js';
 import { resolveDirectory } from './directory.js';
 import type {
+  BotMenuClick,
   CardAction,
   CardJson,
   FeishuMessage,
@@ -81,9 +83,11 @@ import type {
 } from './feishu/types.js';
 import { IDENTITY_PREFIX, IdentityAliasStore, identityBlockText } from './identity-aliases.js';
 import { readLogFile } from './log-file.js';
+import { type MenuCommandSpec, MenuCommandTable } from './menu-run.js';
 import { MessageDeduplicator } from './message-dedup.js';
 import { parseModelArg } from './model-args.js';
 import { applySessionModelSwitch, sessionSelection } from './model-switch.js';
+import { P2pChatStore } from './p2p-chats.js';
 import type { PanelActionContext } from './panel/actions/PanelAction.js';
 import { buildPanelActionRegistry } from './panel/actions/registry.js';
 import { PanelController, type PanelHost } from './panel/PanelController.js';
@@ -427,15 +431,12 @@ export interface AskQuestionsAnswerLike {
 
 /** Options for {@link Bridge}. */
 /**
- * One transient assistant-stream chunk: the `StreamChunk` payload dsh 0.1.5
- * publishes through `agent/assistant-stream`. Only `type` and the optional
- * `text` are structural here — the streaming controller narrows the full
- * shape itself when it folds the chunk into its rows.
+ * One transient live-model-output frame off dsh's `agent/assistant-stream`
+ * dispatch (a process-local publication since dsh 0.1.5 — the in-flight stream
+ * left the durable session-event log). Re-exported from the streaming
+ * controller so the surface has a single definition of the frame shape.
  */
-export interface AssistantStreamChunk {
-  readonly type: string;
-  readonly text?: string;
-}
+export type { AssistantStreamFrameLike };
 
 export interface BridgeOptions {
   readonly transport: FeishuTransport;
@@ -451,14 +452,14 @@ export interface BridgeOptions {
   /**
    * Subscribe to the process-local assistant stream (`dsh-agent-loop`'s
    * `agent/assistant-stream` dispatch). Since dsh 0.1.5 the incremental
-   * text/reasoning deltas are transient frames rather than durable
-   * `assistant/chunk` session events, so this is the channel that keeps the
-   * streaming card live on 0.1.5; a 0.1.2 core never dispatches it and is
-   * served by {@link BridgeOptions.onSessionEvent} alone. Optional so test
-   * doubles and older hosts keep working. Returns a disposer.
+   * text/reasoning deltas are transient `start`/`chunk`/`end` frames rather
+   * than durable `assistant/chunk` session events, so this is the channel that
+   * keeps the streaming card live on 0.1.5; a 0.1.2 core never dispatches it
+   * and is served by {@link BridgeOptions.onSessionEvent} alone. Optional so
+   * test doubles and older hosts keep working. Returns a disposer.
    */
   readonly onAssistantStream?: (
-    listener: (sessionId: string, chunk: AssistantStreamChunk) => void,
+    listener: (sessionId: string, frame: AssistantStreamFrameLike) => void,
   ) => () => void;
   readonly cards: StreamingCardManager;
   readonly defaultCwd: string;
@@ -510,6 +511,14 @@ export interface BridgeOptions {
    * {@link CardCommandRunner}.
    */
   readonly slashCommands?: readonly CardCommandSpec[];
+  /**
+   * Bot custom-menu mapping: a menu item's `event_key` → the `cardCommands`
+   * entry it runs. A menu click carries ONLY the event key (no chat id, no
+   * menu name), so this table is the whole dispatch mechanism; an unmapped key
+   * is logged, never guessed. Empty/absent disables the seam: clicks are then
+   * recorded and dropped. See {@link MenuCommandTable}.
+   */
+  readonly menuCommands?: readonly MenuCommandSpec[];
   /**
    * DSH slash-command passthrough: execute `line` against the chat's live
    * agent through the dsh command registry. Absent, registry commands are
@@ -779,6 +788,17 @@ export class Bridge {
   /** Chat type of the last accepted message per chat (`p2p` needs no @). */
   private readonly chatTypes = new Map<string, 'p2p' | 'group'>();
   /**
+   * Reverse of {@link requesterOpenIds} for p2p chats only: the conversation a
+   * user was last seen talking to the bot in.
+   *
+   * A custom-menu event is p2p-only and carries NO chat id, so this is how a
+   * menu click finds the conversation to act in. Only p2p chats are recorded —
+   * a group id would make a menu command post into the wrong place — and the
+   * table is durable, so the first menu click after a restart is not a silent
+   * no-op. See {@link P2pChatStore}.
+   */
+  private readonly p2pChats: P2pChatStore;
+  /**
    * Pending inbound attachments per chat (inbound-wait-instruction): bare
    * attachment messages (file/image/video — no text) register here instead
    * of starting a turn. The next text message in the chat drains the list
@@ -858,11 +878,6 @@ export class Bridge {
     return sessionId === undefined ? undefined : this.options.agentStore.get(sessionId);
   }
   private readonly disposeEvents: () => void;
-  /** Frames from `agent/assistant-stream` are transient. A core that ALSO
-   *  appends the durable `assistant/chunk` event for a session must not fold
-   *  the same text twice, so once the durable channel has been seen for a
-   *  session, its frames are ignored. */
-  private readonly durableChunkSessions = new Set<string>();
   private readonly disposeAssistantStream: (() => void) | undefined;
   private readonly commands = new CommandRegistry();
   /** The card-button command seam (empty allowlist ⇒ nothing can run). */
@@ -870,6 +885,11 @@ export class Bridge {
   /** The typed-slash direct-run seam (empty allowlist ⇒ every unknown slash
    *  line keeps its old passthrough/unknown behavior). */
   private readonly slashRunner: CardCommandRunner;
+  /** The bot custom-menu mapping (`event_key` → a `cardCommands` entry). */
+  private readonly menuTable: MenuCommandTable;
+  /** Menu-click dedup by event id: the platform may redeliver an event, and
+   *  re-running a command because of it would be a visible double action. */
+  private readonly menuDedup = new MessageDeduplicator();
 
   constructor(private readonly options: BridgeOptions) {
     this.streaming = new StreamingCardController(this.streamingHost());
@@ -883,6 +903,22 @@ export class Bridge {
     this.slashRunner = new CardCommandRunner(options.slashCommands ?? [], {
       logger: options.logger,
       logDir: join(options.dataDir, 'slash-runs'),
+    });
+    this.menuTable = new MenuCommandTable(options.menuCommands ?? []);
+    this.p2pChats = new P2pChatStore(join(options.dataDir, 'p2p-chats.json'), options.logger);
+    this.p2pChats.load();
+    if (this.menuTable.size > 0) {
+      // Say what the mapping is at boot: a menu item whose key is missing here
+      // is invisible until someone clicks it, and the boot log is where that
+      // mismatch is cheapest to spot.
+      options.logger.info(
+        `bot menu mapping: ${this.menuTable.size} key(s) -> ${this.menuTable.keys().join(', ')}`,
+      );
+    }
+    options.transport.onBotMenu?.((click) => {
+      void this.handleBotMenu(click).catch((error: unknown) => {
+        options.logger.error(`feishu bot menu handling failed: ${String(error)}`);
+      });
     });
     options.transport.onMessage((message) => {
       void this.handleMessage(message).catch((error: unknown) => {
@@ -899,8 +935,8 @@ export class Bridge {
         options.logger.error(`session event handling failed: ${String(error)}`);
       });
     });
-    this.disposeAssistantStream = options.onAssistantStream?.((sessionId, chunk) => {
-      this.handleAssistantStreamChunk(sessionId, chunk);
+    this.disposeAssistantStream = options.onAssistantStream?.((sessionId, frame) => {
+      this.handleAssistantStreamFrame(sessionId, frame);
     });
     registerSurfaceCommands(this.commands, this.commandHost());
   }
@@ -970,6 +1006,7 @@ export class Bridge {
       sessionDetail: (chatId, sessionId) => this.sessionDetailView(chatId, sessionId),
       listProjects: (roots) => listProjects(roots),
       repoRoots: this.options.repoRoots ?? [],
+      currentCwd: (chatId) => this.options.sessionMap.cwdFor(chatId),
       loadModelOptions: () => this.loadModelOptions(),
       currentModelSelection: (chatId) => this.currentModelSelection(chatId),
       currentEffort: (chatId) => this.currentEffort(chatId),
@@ -2197,6 +2234,9 @@ export class Bridge {
     // who started this turn.
     this.requesterOpenIds.set(message.chatId, message.senderOpenId);
     this.chatTypes.set(message.chatId, message.chatType === 'group' ? 'group' : 'p2p');
+    if (message.chatType !== 'group') {
+      this.p2pChats.set(message.senderOpenId, message.chatId);
+    }
     // Inbound media (image/file messages): download and inject BEFORE the
     // turn starts — a broken attachment notices loudly but never wedges the
     // chat (the turn continues, text-only when the attachment failed).
@@ -2485,6 +2525,9 @@ export class Bridge {
     // sender started the turn that now runs.
     this.requesterOpenIds.set(chatId, source.senderOpenId);
     this.chatTypes.set(chatId, source.chatType === 'group' ? 'group' : 'p2p');
+    if (source.chatType !== 'group') {
+      this.p2pChats.set(source.senderOpenId, chatId);
+    }
     this.streaming.rememberPrompt(chatId, item.text);
     await this.streaming.beginTurn(chatId, source.messageId, turnTitle(item.text), {
       quiet: item.quiet === true,
@@ -3238,17 +3281,6 @@ export class Bridge {
    * @param event - the session event.
    */
   async handleEvent(sessionId: string, event: SessionEvent): Promise<void> {
-    // A DURABLE `assistant/chunk` (it carries a committed `seq`) proves this
-    // core still appends the deltas, so the transient frame channel must stand
-    // down for this session — otherwise the same text folds twice. The
-    // synthesised frame event in {@link Bridge.handleAssistantStreamChunk} has
-    // no `seq`, which is exactly how the two are told apart here.
-    if (
-      event.type === 'assistant/chunk' &&
-      (event as { readonly seq?: number }).seq !== undefined
-    ) {
-      this.durableChunkSessions.add(sessionId);
-    }
     this.options.logger.debug(`session event ${event.type} from ${sessionId}`);
     await this.streaming.handleEvent(sessionId, event);
     // message-queue: reconcile the per-item queue cards after the event — on
@@ -3263,28 +3295,144 @@ export class Bridge {
   }
 
   /**
-   * Fold one transient assistant-stream chunk into the owning chat's card.
+   * Fold one transient `agent/assistant-stream` frame into the owning chat's card.
    *
    * dsh 0.1.5 stopped appending the durable `assistant/chunk` session event and
-   * publishes the same `StreamChunk` as a process-local
+   * publishes the in-flight model output as a process-local
    * `agent/assistant-stream` frame instead (`dsh-agent-loop`:
-   * `dispatch.emit('agent/assistant-stream', { frame })`, whose `frame.chunk`
-   * is the delta). Without this channel the card never sees a
-   * `reasoning-delta`, so no think row is ever created and the folded card
-   * degrades to `collapseThought`'s tool-row fallback — the user-facing
-   * symptom being "thinking is gone, only the short tool lines remain". The
-   * frame re-enters the very branch the durable event used, so there is one
-   * card state machine and two transports.
+   * `dispatch.emit('agent/assistant-stream', { frame })`; the frame is one
+   * ordered `start` / `chunk` / `end` publication). Without this channel the
+   * card never sees a `reasoning-delta`, so no think row is ever created and
+   * the folded card degrades to `collapseThought`'s tool-row fallback — the
+   * user-facing symptom being "thinking is gone, only the short tool lines
+   * remain".
+   *
+   * The FRAME is forwarded whole (not just its chunk): the controller needs
+   * `start` to open a new publication, the attempt id plus `revision` to drop
+   * a replayed frame from an older revision, and `end` to close the attempt's
+   * think row.
    * @param sessionId - the session that produced the frame.
-   * @param chunk - the transient `StreamChunk` payload.
+   * @param frame - one ordered stream publication (start, chunk, or end).
    */
-  private handleAssistantStreamChunk(sessionId: string, chunk: AssistantStreamChunk): void {
-    // A core that still appends the durable event already fed this text.
-    if (this.durableChunkSessions.has(sessionId)) return;
-    const event = { type: 'assistant/chunk', data: { chunk } } as unknown as SessionEvent;
-    void this.handleEvent(sessionId, event).catch((error: unknown) => {
-      this.options.logger.error(`assistant stream chunk handling failed: ${String(error)}`);
+  private handleAssistantStreamFrame(sessionId: string, frame: AssistantStreamFrameLike): void {
+    try {
+      this.streaming.handleAssistantStream(sessionId, frame);
+    } catch (error: unknown) {
+      this.options.logger.error(`assistant stream handling failed: ${String(error)}`);
+    }
+  }
+
+  /**
+   * Handle one bot custom-menu click (`application.bot.menu_v6`).
+   *
+   * A menu click has no card and no chat id: the event names only the clicked
+   * item's `event_key` and the operator. So this path (a) ALWAYS logs the full
+   * click — the platform's event log says "delivered", and this line is the
+   * only place that says what the surface did with it — then (b) dedups by
+   * event id, (c) resolves `event_key` through the configured mapping, and
+   * (d) runs the mapped `cardCommands` entry in the operator's p2p chat,
+   * exactly as a card button would (same allowlist, same single-flight lock,
+   * same per-run log file).
+   *
+   * Every refusal is logged WITH its reason, and a refusal the user should
+   * know about is also said in the conversation. A click that silently does
+   * nothing is the bug this seam exists to make impossible.
+   * @param click - the normalized menu click.
+   */
+  async handleBotMenu(click: BotMenuClick): Promise<void> {
+    this.options.logger.info(
+      `bot menu click: event_key=${click.eventKey} operator=${click.operatorOpenId}` +
+        `${click.operatorName !== undefined ? ` (${click.operatorName})` : ''}` +
+        ` event_id=${click.eventId} menu_ts=${click.timestamp ?? ''}`,
+    );
+    this.options.logger.debug(`bot menu click payload: ${JSON.stringify(click)}`);
+    // Dedup by EVENT id, never by event key: the same person clicking the same
+    // menu item again is a legitimate new click (a new event id), while a
+    // redelivery of one click repeats the id.
+    if (click.eventId !== '' && !this.menuDedup.claim(click.eventId)) {
+      this.options.logger.warn(`bot menu click ${click.eventId} ignored: already handled`);
+      return;
+    }
+    const allowedUsers = this.options.allowedUsers ?? [];
+    if (allowedUsers.length > 0 && !allowedUsers.includes(click.operatorOpenId)) {
+      this.options.logger.info(
+        `bot menu click from user ${click.operatorOpenId}: not in user allowlist`,
+      );
+      return;
+    }
+    const spec = this.menuTable.resolve(click.eventKey);
+    if (spec === undefined) {
+      this.options.logger.warn(
+        `bot menu click: no menuCommands entry for event_key="${click.eventKey}"` +
+          ` (configured: ${this.menuTable.keys().join(', ') || '(none)'})`,
+      );
+      return;
+    }
+    const chatId = await this.resolveMenuChat(click, spec.command);
+    if (chatId === undefined) return;
+    const request: CardRunRequest = { name: spec.command, args: [...spec.args] };
+    const outcome = this.startCardCommand(request, {
+      chatId,
+      // A menu click has no card, so `{card}` resolves empty (the runner
+      // documents the empty argument as the "no card context" case).
+      messageId: '',
+      operatorOpenId: click.operatorOpenId,
+      formValue: {},
     });
+    if (!outcome.ok) {
+      try {
+        await this.options.transport.sendText(chatId, outcome.text);
+      } catch (error: unknown) {
+        this.options.logger.warn(`bot menu refusal notice failed: ${String(error)}`);
+      }
+    }
+  }
+
+  /**
+   * Find the conversation a bot-menu click should act in.
+   *
+   * The event names the operator but carries no chat id, so the answer comes
+   * from the learned p2p table. On a miss — the first click after a fresh
+   * install, or a person who has never messaged the bot — the surface ADDRESSES
+   * THE OPERATOR BY OPEN ID rather than giving up: the platform resolves the
+   * p2p chat and returns its id, so the click both gets a visible
+   * acknowledgement and teaches the table where to work from then on.
+   * @param click - the normalized menu click.
+   * @param command - the mapped command name (diagnostics only).
+   * @returns the chat id, or `undefined` when it cannot be established.
+   */
+  private async resolveMenuChat(click: BotMenuClick, command: string): Promise<string | undefined> {
+    const known = this.p2pChats.get(click.operatorOpenId);
+    if (known !== undefined) return known;
+    const transport = this.options.transport;
+    const sendToUser = transport.sendTextToUser;
+    if (sendToUser === undefined || click.operatorOpenId === '') {
+      this.options.logger.warn(
+        `bot menu click: no p2p conversation known for ${click.operatorOpenId}, ` +
+          `cannot run "${command}" (the event carries no chat id)`,
+      );
+      return undefined;
+    }
+    try {
+      const chatId = await sendToUser.call(transport, click.operatorOpenId, t('botMenu.locating'));
+      if (chatId === undefined) {
+        this.options.logger.warn(
+          `bot menu click: addressing ${click.operatorOpenId} by open id returned no chat id, ` +
+            `cannot run "${command}"`,
+        );
+        return undefined;
+      }
+      this.p2pChats.set(click.operatorOpenId, chatId);
+      this.options.logger.info(
+        `bot menu click: learned p2p chat ${chatId} for ${click.operatorOpenId} -> running "${command}"`,
+      );
+      return chatId;
+    } catch (error: unknown) {
+      this.options.logger.warn(
+        `bot menu click: could not address ${click.operatorOpenId} by open id: ${String(error)}`,
+      );
+      return undefined;
+    }
   }
 
   /**

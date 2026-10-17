@@ -34,6 +34,10 @@ export interface PanelViewContext {
   listProjects(roots: readonly string[]): Promise<readonly ProjectInfo[]>;
   /** The repo roots scanned by the repo picker (empty = empty picker). */
   readonly repoRoots: readonly string[];
+  /** The chat's remembered working directory (its pinned cwd), or `undefined`
+   *  when none was chosen yet — the repo picker preselects it so a re-open
+   *  shows the choice instead of a bare placeholder. */
+  currentCwd(chatId: string): string | undefined;
   /** The /model picker catalog, or `undefined` when the llm service is absent. */
   loadModelOptions(): Promise<readonly ModelOptionView[] | undefined>;
   /** The chat's current model as a `provider/model` selection arg. */

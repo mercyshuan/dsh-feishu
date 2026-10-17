@@ -56,12 +56,6 @@ describe('sessionExportLine', () => {
     const line = sessionExportLine(event('turn/end', 5, { reason: { kind: 'aborted' } }));
     expect(line).toContain('turn ended: aborted');
   });
-
-  it('renders nothing for streaming deltas', () => {
-    expect(
-      sessionExportLine(event('assistant/chunk', 1, { chunk: { type: 'text-delta', text: 'x' } })),
-    ).toBe('');
-  });
 });
 
 describe('buildSessionExport', () => {

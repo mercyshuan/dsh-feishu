@@ -134,11 +134,14 @@ Reference: botmux streaming card; our `StreamingCardManager`.
 | Event | Card behavior |
 | --- | --- |
 | `turn/start` (via message) | open card, status working |
-| `assistant/chunk` text-delta | append to answer, patch |
-| `assistant/chunk` reasoning-delta | append to open think row, patch |
+| `agent/assistant-stream` `start` frame | reset the live-attempt revision baseline; no render |
+| `agent/assistant-stream` `chunk` text-delta | append to answer, patch |
+| `agent/assistant-stream` `chunk` reasoning-delta | append to open think row, patch |
+| `agent/assistant-stream` `end` frame | settle the attempt's think row, patch |
 | `tool/call` | settle open think row; add tool row (running) |
 | `tool/result` | mark the matching tool row done/error, store result |
 | `assistant/message` | replace answer with assembled text |
+| `assistant/attempt` | settle the open think row; keep the live text (a failed/retried/cancelled attempt committed no surface message), patch |
 | `turn/end` | settle think row; status done/error; finalize card; keep snapshot + rows for re-assertion and the ⋯ buttons |
 | `compaction/start` | open a 🧹 Compacting card, status working (a compaction transaction is not a turn) |
 | `compaction/summary` | replace the card answer with the compaction summary |
@@ -280,6 +283,13 @@ rounds 1–5.
   label = **repoRoot-relative path** + `(branch)` — never the bare
   basename (generic names like `source` are meaningless alone).
 - \> 50: numbered buttons with prev/next pagination.
+- **The chosen working directory is remembered**: the picker is built from
+  the chat's pinned cwd (the same source `/cd` writes), not from a blank
+  slate — so re-opening it (panel button or `/repo`) renders the dropdown
+  with that path preselected (`initial_option`) and its row marked `★`, plus
+  a quiet note naming the current workspace. A pinned path the scan does not
+  return (a `/cd` outside `repoRoots`, a root that changed) is prepended as
+  its own `★` row, so the remembered choice never vanishes on re-open.
 - **Picker lifecycle**: a pick patches the picker card to a static
   confirmation (no actions) and records the message id; callbacks from a
   superseded picker are rejected (stale-picker guard).
@@ -297,8 +307,9 @@ rounds 1–5.
    of the callback.
 4. Tool summaries never show raw JSON envelopes for long commands.
 5. Details cards show full args/result.
-6. Repo dropdown shows relative paths; picker is consumed after a pick;
-   stale picker callbacks are ignored.
+6. Repo dropdown shows relative paths and preselects the chat's current
+   working directory (`initial_option` + `★` row + current-workspace note);
+   the picker is consumed after a pick and stale picker callbacks are ignored.
 7. Every step has a unit test; state-machine transitions are covered as
    explicit tests (see `tests/bridge.spec.ts` UX state machine block).
 
