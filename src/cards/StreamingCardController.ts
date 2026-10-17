@@ -270,6 +270,32 @@ function settleOpenThink(state: ChatCardState): void {
   }
 }
 
+/**
+ * One transient live-model-output frame off dsh's `agent/assistant-stream`
+ * dispatch (a process-local publication since dsh 0.1.5 — the in-flight
+ * stream left the durable session-event log). Kept structural so the
+ * controller never depends on the harness package at runtime.
+ *
+ * `revision` is monotone within one attempt and a replacement restarts it at
+ * 1, which is why a `start` frame always resets the baseline instead of being
+ * compared against the previous stream's revision.
+ */
+export interface AssistantStreamFrameLike {
+  readonly type: 'start' | 'chunk' | 'end';
+  readonly attemptId?: unknown;
+  readonly revision: number;
+  readonly turn?: number;
+  readonly step?: number;
+  /** Dense zero-based position within the attempt (chunk/end frames). */
+  readonly index?: number;
+  /** End frames: the durable settlement committed before the notification. */
+  readonly outcome?: unknown;
+  readonly chunk?: {
+    readonly type?: string;
+    readonly text?: string;
+  };
+}
+
 /** Logger surface the streaming controller needs. */
 export interface StreamingLogger {
   info(message: string): void;
@@ -358,6 +384,14 @@ export class StreamingCardController {
   private readonly finishedRenders = new Map<string, Map<string, CardSnapshot>>();
   /** Insertion order per chat for bounding {@link finishedRenders}. */
   private readonly finishedOrder = new Map<string, string[]>();
+  /** Latest live assistant-stream attempt per chat (`agent/assistant-stream`):
+   *  the attempt id plus the highest revision seen, so a frame a replaced
+   *  lifecycle replays from an older revision of the same attempt is dropped
+   *  instead of appended a second time. */
+  private readonly liveAttempts = new Map<
+    string,
+    { readonly attempt: unknown; readonly revision: number }
+  >();
 
   constructor(private readonly host: StreamingCardHost) {}
 
@@ -450,6 +484,10 @@ export class StreamingCardController {
     options: { readonly quiet?: boolean } = {},
   ): Promise<void> {
     const quiet = options.quiet === true;
+    // A new turn starts a new live stream: forget the previous turn's attempt
+    // baseline so a stale high revision from a finished turn can never
+    // suppress the next turn's frames.
+    this.liveAttempts.delete(chatId);
     this.host.logger.debug(
       `streaming beginTurn ${chatId}: message ${messageId} '${title}'` +
         (quiet ? ' (quiet: external card owns the UI)' : ' (two-stage ack stage 1)'),
@@ -635,6 +673,100 @@ export class StreamingCardController {
   }
 
   /**
+   * Fold one live `agent/assistant-stream` frame into the owning chat's card.
+   *
+   * dsh 0.1.5 stopped appending the durable `assistant/chunk` session event and
+   * publishes the in-flight model output as a process-local, agent-scoped
+   * frame instead (`start` / `chunk` / `end`; `dsh-agent-loop`:
+   * `dispatch.emit('agent/assistant-stream', { frame })`). Without this channel
+   * the card never sees a `reasoning-delta`, so no think row is ever created
+   * and the folded card degrades to `collapseThought`'s tool-row fallback —
+   * the user-facing symptom being "thinking is gone, only the short tool lines
+   * remain".
+   *
+   * Frames carry the attempt id and a monotone `revision`, so a frame replayed
+   * from an older revision of the current attempt is stale and must not be
+   * appended a second time; a `start` frame always opens a new publication and
+   * resets that baseline.
+   * @param sessionId - the session whose agent produced the frame.
+   * @param frame - one ordered stream publication (start, chunk, or end).
+   */
+  handleAssistantStream(sessionId: string, frame: AssistantStreamFrameLike): void {
+    const chatId = this.host.sessionMap.chatFor(sessionId);
+    if (chatId === undefined) {
+      this.host.logger.debug(
+        `streaming assistant-stream ${frame.type} from session ${sessionId}: no chat mapped, ignored`,
+      );
+      return;
+    }
+    const state = this.cardStates.get(chatId);
+    if (state === undefined || state.status !== 'working') return;
+    if (frame.type === 'start') {
+      // A start frame opens a new live publication and ALWAYS resets the
+      // baseline: a replacement restarts `revision` at 1, so comparing it
+      // against the previous stream's revision would drop the whole new
+      // attempt — and every delta that follows it.
+      this.liveAttempts.set(chatId, { attempt: frame.attemptId, revision: frame.revision });
+      this.host.logger.debug(
+        `streaming assistant-stream start ${chatId}: attempt ${String(frame.attemptId)} rev ${frame.revision} turn ${frame.turn} step ${frame.step}`,
+      );
+      return;
+    }
+    const live = this.liveAttempts.get(chatId);
+    if (live !== undefined && frame.attemptId === live.attempt && frame.revision < live.revision) {
+      this.host.logger.debug(
+        `streaming assistant-stream ${frame.type} ${chatId}: stale revision ${frame.revision} < ${live.revision}, ignored`,
+      );
+      return;
+    }
+    this.liveAttempts.set(chatId, { attempt: frame.attemptId, revision: frame.revision });
+    if (frame.type === 'end') {
+      // Reasoning belongs to ONE attempt: close the think row at its end so
+      // the next attempt (or the settled message) opens a fresh one.
+      settleOpenThink(state);
+      this.host.logger.debug(
+        `streaming assistant-stream end ${chatId}: attempt ${String(frame.attemptId)} rev ${frame.revision}`,
+      );
+      this.syncCard(chatId);
+      return;
+    }
+    if (frame.chunk !== undefined) this.applyStreamChunk(chatId, state, frame.chunk);
+  }
+
+  /**
+   * Fold one incremental text/reasoning delta into a card state, then re-render.
+   *
+   * The single applier behind the live `agent/assistant-stream` chunk frame:
+   * one card state machine, one delta path.
+   * @param chatId - the owning chat.
+   * @param state - the chat's authoritative card state.
+   * @param chunk - the delta (`text-delta` or `reasoning-delta`).
+   */
+  private applyStreamChunk(
+    chatId: string,
+    state: ChatCardState,
+    chunk: { readonly type?: string; readonly text?: string },
+  ): void {
+    if (chunk.type === 'text-delta') {
+      state.content += chunk.text ?? '';
+      this.syncCard(chatId);
+    } else if (chunk.type === 'reasoning-delta') {
+      // One think row per reasoning block; deltas append to the open row.
+      if (state.openThinkId === undefined) {
+        thinkRowSeq += 1;
+        ensureThinkRow(state, `think-${thinkRowSeq}`);
+      }
+      const id = state.openThinkId;
+      const index = state.rows.findIndex((row) => row.id === id);
+      if (index >= 0 && state.rows[index]?.kind === 'think') {
+        const row = state.rows[index] as ThinkRow;
+        state.rows[index] = { ...row, text: row.text + (chunk.text ?? '') };
+      }
+      this.syncCard(chatId);
+    }
+  }
+
+  /**
    * Render one session event into the owning chat's streaming card.
    * @param sessionId - the session that produced the event.
    * @param event - the session event.
@@ -759,25 +891,19 @@ export class StreamingCardController {
         }
         break;
       }
-      case 'assistant/chunk': {
-        const chunk = event.data.chunk;
-        if (chunk.type === 'text-delta') {
-          state.content += chunk.text;
-          this.syncCard(chatId);
-        } else if (chunk.type === 'reasoning-delta') {
-          // One think row per reasoning block; deltas append to the open row.
-          if (state.openThinkId === undefined) {
-            thinkRowSeq += 1;
-            ensureThinkRow(state, `think-${thinkRowSeq}`);
-          }
-          const id = state.openThinkId;
-          const index = state.rows.findIndex((row) => row.id === id);
-          if (index >= 0 && state.rows[index]?.kind === 'think') {
-            const row = state.rows[index] as ThinkRow;
-            state.rows[index] = { ...row, text: row.text + chunk.text };
-          }
-          this.syncCard(chatId);
-        }
+      case 'assistant/attempt': {
+        // A failed / retried / cancelled attempt that committed NO surface
+        // message: it preserves its own stream records but contributes no
+        // model-visible content, so the card keeps the live text it already
+        // streamed (a successful settle overwrites content via
+        // `assistant/message`). Only the open think row is closed, so the next
+        // attempt's reasoning opens a fresh row instead of appending to the
+        // dead one.
+        settleOpenThink(state);
+        this.host.logger.debug(
+          `streaming assistant/attempt ${chatId}: turn ${event.data.turn} step ${event.data.step} streamed no surface message`,
+        );
+        this.syncCard(chatId);
         break;
       }
       case 'tool/call': {

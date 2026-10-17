@@ -24,7 +24,9 @@ pnpm run setup:feishu -- --new       # 创建新应用并完成配置
 2. 启用**机器人**能力。
 3. 将**事件与卡片回调切换为长连接**，并订阅 `im.message.receive_v1`（事件）+
    `card.action.trigger`（卡片回调）——两者均为必需项，且会通过读回进行校验
-   （失败即关闭，fail-closed）。
+   （失败即关闭，fail-closed）——另外订阅 `application.bot.menu_v6`（机器人
+   自定义菜单点击；未配置 `menuCommands` 映射时无害，而提前开通它可让日后新增的
+   菜单无需再跑一次 setup）。
 4. 授予 manifest 清单中的全部权限（见第 3 步的权限表）。
 5. 以**"仅自己可见"**的可见范围发布一个应用版本——自动通过审批，无需等待
    管理员。
@@ -82,7 +84,9 @@ endpoint、宿主机无需公网 IP（所有流量均为出站）。在 **Events
 （事件与回调）中：
 
 - **Events**（事件订阅方式）：选择 **Long connection**（长连接），并订阅
-  **Receive messages**（`im.message.receive_v1`，接收消息）。
+  **Receive messages**（`im.message.receive_v1`，接收消息）。若使用
+  `menuCommands`，还需订阅 **Bot custom menu**（`application.bot.menu_v6`）：
+  响应动作为**推送事件**的菜单项才会产生该事件，未订阅则点击永远不会送达。
 - **Card callbacks**（卡片回调）：卡片按钮点击是**回调，而非事件**——其接收
   方式是**单独**配置的。请同样将卡片回调的接收方式切换为 **Long connection**
   （长连接），否则按钮点击会失败并提示"该应用尚未配置卡片回调"。
@@ -142,6 +146,32 @@ dsh --profile feishu
 | `FEISHU_GROUP_MENTION_MODE` | `always` \| `never` \| `ambient` \| `topic` | group mention policy |
 | `FEISHU_UNKNOWN_COMMAND` | `error` \| `passthrough` | unknown slash-line policy |
 | `FEISHU_LOCALE` | `en-US` \| `zh-CN` | Surface 语言（见下文） |
+
+### 机器人自定义菜单
+
+机器人的自定义菜单（1:1 聊天输入框上方的菜单项）支持三种点击响应动作；只有
+**推送事件**会到达本 surface，形式为 `application.bot.menu_v6` 事件。事件只带
+菜单项的开发者自定义 `event_key` 与操作人——**没有 chat id，也没有菜单名**——
+因此 surface 需要一份从 key 到 `cardCommands` 条目名的映射：
+
+```yaml
+config:
+  appId: cli_xxx
+  appSecret: yyy
+  menuCommands:
+    - eventKey: menu_new_session
+      command: new-session      # cardCommands 中的条目名
+    - eventKey: menu_status
+      command: status
+```
+
+- 真正决定**运行什么**的仍是所引用的 `cardCommands` 条目（路径/argv 白名单、
+  单飞锁、每次运行的日志）——菜单项永远不能自己指定路径。
+- 映射本身就是全部分发逻辑：未映射的 `event_key` 会被记录并丢弃，绝不猜测。
+- 点击事件没有 chat id，因此在操作人的 p2p 会话里执行——该会话从对方的历史
+  入站消息中学习，并持久化在数据目录下的 `p2p-chats.json`。对于 surface 从未
+  见过的人，首次点击会按 open id 直接给他发消息，这条回执同时让 surface 学到
+  该会话。
 
 ### Surface 语言
 

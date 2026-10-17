@@ -85,11 +85,14 @@ done|stopped|error --any action--->  same (state unchanged; card re-synced)
 | 事件 | 卡片行为 |
 | --- | --- |
 | `turn/start`（经由 message） | 打开卡片，状态 working |
-| `assistant/chunk` 文本增量 | 追加到答案，patch |
-| `assistant/chunk` 推理增量 | 追加到打开的思考行，patch |
+| `agent/assistant-stream` `start` 帧 | 重置实时 attempt 的 revision 基线；不渲染 |
+| `agent/assistant-stream` `chunk` 文本增量 | 追加到答案，patch |
+| `agent/assistant-stream` `chunk` 推理增量 | 追加到打开的思考行，patch |
+| `agent/assistant-stream` `end` 帧 | 结算该 attempt 的思考行，patch |
 | `tool/call` | 稳定打开的思考行；添加工具行（running） |
 | `tool/result` | 将匹配的工具行标记为 done/error，存储结果 |
 | `assistant/message` | 用组装好的文本替换答案 |
+| `assistant/attempt` | 结算打开的思考行；保留实时正文（失败/重试/取消的 attempt 未提交 surface message），patch |
 | `turn/end` | 稳定思考行；状态 done/error；定稿卡片；保留 snapshot + rows 供重新断言和 ⋯ 按钮使用 |
 | `compaction/start` | 打开 🧹 Compacting 卡，状态 working（compaction 事务不是回合） |
 | `compaction/summary` | 用压缩摘要替换卡片答案 |
@@ -203,6 +206,7 @@ done|stopped|error --any action--->  same (state unchanged; card re-synced)
 - `/repo` 递归扫描 `repoRoots`（深度 3，跳过点目录/依赖目录，git-common-dir 去重，预算限制）并发布选择器卡片。
 - ≤ 50 个项目：一个 `select_static` 下拉框**直接放在 `action` 容器内**（放在 `form` 中会被飞书静默丢弃）。选项标签 = **repoRoot 相对路径** + `(branch)` —— 绝不是裸 basename（像 `source` 这种通用名字单独出现毫无意义）。
 - \> 50：带上一页/下一页分页的编号按钮。
+- **已选工作目录会被记住**：选择器基于该会话已 pin 的 cwd（与 `/cd` 写入的同源）构建，而不是每次从空白开始——因此重新打开（面板按钮或 `/repo`）时，下拉框会用该路径预选（`initial_option`）、对应行标 `★`，底部还有一行安静的说明写明当前工作区。若已 pin 的路径不在扫描结果里（`/cd` 到 `repoRoots` 之外，或根目录变更），它会作为自己的 `★` 行置顶，保证记住的选择不会在重新打开时消失。
 - **选择器生命周期**：一次选择将选择器卡片 patch 成静态确认（无操作）并记录消息 id；来自已被取代的选择器的回调会被拒绝（stale-picker 防护）。
 - `repo-pick` 从 `action.option`（下拉框）或 `value.path`（按钮）读取所选路径。
 
@@ -215,7 +219,7 @@ done|stopped|error --any action--->  same (state unchanged; card re-synced)
 3. 卡片操作 ACK `{}`（绝不返回 `undefined`）；卡片 patch 延迟到回调之外。
 4. 工具 summary 绝不为长命令显示原始 JSON 包裹。
 5. 详情卡片显示完整参数/结果。
-6. Repo 下拉框显示相对路径；选择后选择器即被消费；过期选择器的回调被忽略。
+6. Repo 下拉框显示相对路径，并预选该会话当前工作目录（`initial_option` + `★` 行 + 当前工作区说明）；选择后选择器即被消费；过期选择器的回调被忽略。
 7. 每一步都有单元测试；状态机转换以显式测试覆盖（见 `tests/bridge.spec.ts` 的 UX 状态机区块）。
 
 ## 8. 命令面（Command surface）

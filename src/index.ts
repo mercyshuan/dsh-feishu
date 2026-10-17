@@ -38,7 +38,7 @@ import {
   type AgentStore,
   type ApprovalRequestLike,
   type AskQuestionsRequestLike,
-  type AssistantStreamChunk,
+  type AssistantStreamFrameLike,
   Bridge,
   type BridgeLogger,
   type LlmService,
@@ -55,6 +55,7 @@ import type { FeishuTransport } from './feishu/types.js';
 import { isLocale, type Locale, setActiveLocale } from './i18n/index.js';
 import { logFilePath } from './log-file.js';
 import { createMemoryTransport } from './memory-transport.js';
+import { type MenuCommandConfig, normalizeMenuCommands } from './menu-run.js';
 import { registerSendFileTool } from './outbound.js';
 import type { SessionExportEvent } from './session-export.js';
 import { SessionMap } from './session-map.js';
@@ -143,6 +144,19 @@ export interface Config {
    */
   readonly slashCommands?: SlashCommandConfig[];
   /**
+   * Bot custom-menu mapping: each entry binds a menu item's developer-defined
+   * `event_key` to the NAME of a `cardCommands` entry to run when that item is
+   * clicked (`application.bot.menu_v6`).
+   *
+   * A menu event carries only the event key — no chat id, no menu name — so
+   * this mapping is the entire dispatch, and the referenced `cardCommands`
+   * entry remains the only thing that decides WHAT runs (a menu item can never
+   * name a path). A click whose key is not listed here is logged and dropped.
+   * The menu item must have its response action set to "推送事件" in the
+   * developer console, otherwise no event is ever produced.
+   */
+  readonly menuCommands?: MenuCommandConfig[];
+  /**
    * UI language for everything the bot says on the Feishu surface (cards,
    * panels, command labels, gate notices). Default `en-US`. Falls back to
    * the `FEISHU_LOCALE` environment variable.
@@ -224,6 +238,15 @@ export const Config: z<Config> = z.object({
         file: z.string().required(false),
         args: z.array(z.string()).required(false),
         cwd: z.string().required(false),
+      }),
+    )
+    .required(false),
+  menuCommands: z
+    .array(
+      z.object({
+        eventKey: z.string(),
+        command: z.string(),
+        args: z.array(z.string()).required(false),
       }),
     )
     .required(false),
@@ -588,28 +611,6 @@ function presetSetup(ctx: Context, agentPreset: string): (agentCtx: Context) => 
 }
 
 /** Injectable dependencies so `apply` is unit-testable without a network. */
-/**
- * The `agent/assistant-stream` dispatch payload (`dsh-agent-loop`): the owning
- * agent plus one transient frame. Only the members this surface reads are
- * structural here, so the subscription does not depend on the host's exact
- * exported frame types.
- */
-interface AssistantStreamFramePayload {
-  readonly agent: { readonly session: { readonly id: unknown } };
-  readonly frame: { readonly type: string; readonly chunk?: AssistantStreamChunk };
-}
-
-/**
- * `ctx.on`, widened for host events the compiled `Events` map does not carry.
- * `agent/assistant-stream` ships with dsh 0.1.5 while this package still
- * compiles against the 0.1.2 type tree, so subscribing through the narrow
- * `keyof Events` overload would not type-check.
- */
-type HostEventOn = (
-  name: string,
-  listener: (payload: AssistantStreamFramePayload) => void,
-) => () => void;
-
 export interface ApplyDeps {
   /** Transport factory; defaults to the lark-oapi implementation. */
   createTransport?: (credentials: Credentials, logger: BridgeLogger) => FeishuTransport;
@@ -762,16 +763,13 @@ export function apply(ctx: Context, config: Config, deps: ApplyDeps = {}): void 
     // dsh 0.1.5 publishes the incremental text/reasoning deltas as transient
     // `agent/assistant-stream` frames instead of durable `assistant/chunk`
     // session events; without this subscription the streaming card loses its
-    // think rows and renders only the tool trail.
+    // think rows and renders only the tool trail. The whole FRAME is forwarded
+    // (start / chunk / end): the controller needs the attempt id and revision
+    // to drop a replayed delta, and `end` to close the attempt's think row.
     onAssistantStream: (listener) =>
-      (ctx.on as unknown as HostEventOn)(
-        'agent/assistant-stream',
-        (payload: AssistantStreamFramePayload) => {
-          const { frame } = payload;
-          if (frame.type !== 'chunk' || frame.chunk === undefined) return;
-          listener(String(payload.agent.session.id), frame.chunk);
-        },
-      ),
+      ctx.on('agent/assistant-stream', (payload) => {
+        listener(String(payload.agent.session.id), payload.frame);
+      }),
     cards,
     defaultCwd: config.defaultCwd ?? process.cwd(),
     dataDir,
@@ -791,6 +789,9 @@ export function apply(ctx: Context, config: Config, deps: ApplyDeps = {}): void 
       : {}),
     ...(config.slashCommands !== undefined
       ? { slashCommands: normalizeSlashCommands(config.slashCommands) }
+      : {}),
+    ...(config.menuCommands !== undefined
+      ? { menuCommands: normalizeMenuCommands(config.menuCommands) }
       : {}),
     ...(config.reactions !== undefined ? { reactions: config.reactions } : {}),
     identityAliasesFile,

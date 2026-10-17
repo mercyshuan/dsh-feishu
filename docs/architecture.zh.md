@@ -33,6 +33,8 @@ Feishu user ──message──> Feishu platform ──WS long connection──>
                                                                     │
                                                                     ▼
                                                               dsh session/event stream
+                                                                    + 实时
+                                                              agent/assistant-stream
 ```
 
 ## 模块
@@ -77,7 +79,7 @@ Feishu user ──message──> Feishu platform ──WS long connection──>
 - **Session 重放。** 只有一个入口：`/export` 将聊天的 session 日志以文件消息形式发送（lark_md 安全的转录）。`/history` 因冗余已被移除。
 - **一个聊天就是一个 session。** 一个飞书聊天映射到一个 dsh session id（`feishu-*`），持久化保存，重启后每个聊天都会被恢复。
 - **重启安全的 session 解析。** 对于有映射 session 但没有 live agent 的聊天，bridge 会恢复持久化的 session；如果没有持久化则新建；如果映射的 id 与磁盘上的日志冲突，则重绑一个新 id。历史在守护进程重启后仍然存在。
-- **每轮一张卡片。** 消息到达时发布卡片，并在块/工具流入时进行 patch。**最终答案保留在卡片中**（它就地绿色 finalize——没有第二个气泡）；失败会附加一个 ⚠️ 提示，使中断的回合永远不会被忽略。patch 是静默的（无未读），这也是第一次卡片发送就是通知的原因。
+- **每轮一张卡片。** 消息到达时发布卡片，并在实时流（`agent/assistant-stream`，dsh 0.1.5 起的在飞模型输出）与落库 session 事件到达时进行 patch。**最终答案保留在卡片中**（它就地绿色 finalize——没有第二个气泡）；失败会附加一个 ⚠️ 提示，使中断的回合永远不会被忽略。patch 是静默的（无未读），这也是第一次卡片发送就是通知的原因。
 - **文本兜底。** 如果发布流式卡片失败，回合仍会运行，最终答案以文本形式送达。
 - **去重。** 在进程生命周期内，重投的消息 id 会被忽略（持久化去重延后）。
 

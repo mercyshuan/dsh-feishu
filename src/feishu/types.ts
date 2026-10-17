@@ -297,6 +297,32 @@ export interface CardAction {
   readonly formValue?: Record<string, string>;
 }
 
+/**
+ * One bot custom-menu click (`application.bot.menu_v6`) normalized for the
+ * surface.
+ *
+ * The custom menu is a p2p-only UI and the event carries NO chat id — only the
+ * operator — so resolving the target conversation is the surface's job. The
+ * event key is the menu item's developer-defined identity and the only thing
+ * that distinguishes one menu item from another (the payload has no menu name
+ * or id at all).
+ */
+export interface BotMenuClick {
+  /** The clicked menu item's developer-defined key (the event's `event_key`). */
+  readonly eventKey: string;
+  /** Who clicked (open id). Empty when the platform sent none. */
+  readonly operatorOpenId: string;
+  /** Display name of the operator, when the app has the field permission. */
+  readonly operatorName?: string;
+  /**
+   * Globally unique event id — the idempotency key for platform redeliveries
+   * (a menu event has no message id). Empty when the platform sent none.
+   */
+  readonly eventId: string;
+  /** Click time supplied by the platform (as sent; unit follows the event). */
+  readonly timestamp?: number;
+}
+
 /** Group membership counts, used for the 1-person-1-bot solo relaxation. */
 export interface ChatStats {
   readonly userCount: number;
@@ -313,8 +339,25 @@ export interface FeishuTransport {
   onMessage(handler: (message: FeishuMessage) => void): void;
   /** Register the single card-button handler (last registration wins). */
   onCardAction(handler: (action: CardAction) => void): void;
+  /**
+   * Register the single bot-custom-menu handler (last registration wins).
+   *
+   * Optional: a transport that cannot deliver `application.bot.menu_v6` simply
+   * omits it, and the surface then never dispatches a menu click.
+   */
+  onBotMenu?(handler: (click: BotMenuClick) => void): void;
   /** Send a plain text message to a chat. */
   sendText(chatId: string, text: string): Promise<void>;
+  /**
+   * Send a plain text message to a person by open id, returning the p2p chat
+   * the platform delivered it in.
+   *
+   * Optional: it exists for the bot-menu seam, which receives an operator but
+   * no chat id. A transport that cannot address a user directly omits it, and
+   * the surface then simply cannot act on a menu click until it has seen an
+   * inbound message from that person.
+   */
+  sendTextToUser?(openId: string, text: string): Promise<string | undefined>;
   /**
    * Upload bytes as a file message (im.v1.file.create → file_key →
    * im.v1.message.create with msg_type 'file'). Used by /export to deliver

@@ -27,6 +27,7 @@ import {
   type PanelCommand,
   type PanelPageEntry,
   panelPages,
+  REPO_PAGE_SIZE,
   REPO_SELECT_MAX_OPTIONS,
   repoOptionLabel,
   repoRelativePath,
@@ -35,6 +36,7 @@ import {
 } from '../../src/cards/render.js';
 import { toolRowSummary, toolRowTitle } from '../../src/cards/tool-summary.js';
 import type { ButtonAction, CardElement, SelectAction } from '../../src/feishu/types.js';
+import { t } from '../../src/i18n/index.js';
 
 /** Button-only labels of an action element (skips select dropdowns). */
 function buttonLabels(el: CardElement | undefined): string[] {
@@ -632,6 +634,71 @@ describe('repo relative paths', () => {
     const first = actions[0];
     expect(selectOf(first)).toBeUndefined();
     expect(buttonLabels(first).length).toBeGreaterThan(0);
+  });
+});
+
+describe('repo picker remembers the chosen working directory', () => {
+  const projects = [
+    { name: 'source', path: '/work/a/source', type: 'repo', branch: 'main' },
+    { name: 'source', path: '/work/b/source', type: 'repo', branch: 'dev' },
+  ] as const;
+
+  const selectOfCard = (card: ReturnType<typeof buildRepoPickerCard>): SelectAction | undefined =>
+    selectOf(card.elements.find((el) => el.tag === 'action'));
+
+  it('preselects the pinned project and marks its row with ★', () => {
+    const card = buildRepoPickerCard(projects, ['/work'], 0, '/work/b/source');
+    const select = selectOfCard(card);
+    expect(select?.initial_option).toBe('/work/b/source');
+    expect(select?.options.map((option) => option.text.content)).toEqual([
+      '1. a/source (main)',
+      '2. ★ b/source (dev)',
+    ]);
+    const note = card.elements.find((el) => el.tag === 'note');
+    expect(note?.elements[0]?.content).toBe(t('card.repo.currentNote', { path: '/work/b/source' }));
+  });
+
+  it('falls back to the placeholder (and no note) before a choice is made', () => {
+    const card = buildRepoPickerCard(projects, ['/work']);
+    const select = selectOfCard(card);
+    expect(select?.initial_option).toBeUndefined();
+    expect(select?.options[0]?.text.content).toBe('1. a/source (main)');
+    expect(card.elements.some((el) => el.tag === 'note')).toBe(false);
+  });
+
+  it('adds a pinned path outside repoRoots as the first ★ option', () => {
+    const card = buildRepoPickerCard(projects, ['/work'], 0, '/other/place');
+    const select = selectOfCard(card);
+    expect(select?.initial_option).toBe('/other/place');
+    expect(select?.options[0]).toEqual({
+      text: { tag: 'plain_text', content: '1. ★ /other/place' },
+      value: '/other/place',
+    });
+    expect(select?.options[1]?.text.content).toBe('2. a/source (main)');
+    expect(select?.options).toHaveLength(3);
+  });
+
+  it('matches the pinned path ignoring a trailing separator', () => {
+    const card = buildRepoPickerCard(projects, ['/work'], 0, '/work/a/source/');
+    const select = selectOfCard(card);
+    expect(select?.initial_option).toBe('/work/a/source');
+    expect(select?.options).toHaveLength(2);
+  });
+
+  it('keeps the ★ marker in the paginated button fallback', () => {
+    const many = Array.from({ length: REPO_SELECT_MAX_OPTIONS }, (_, i) => ({
+      name: `p${i}`,
+      path: `/work/p${i}`,
+      type: 'repo' as const,
+      branch: 'main',
+    }));
+    // 50 scanned projects + the pinned path outside them = 51 rows → buttons.
+    const card = buildRepoPickerCard(many, ['/work'], 0, '/elsewhere/x');
+    const first = card.elements.find((el) => el.tag === 'action');
+    expect(selectOf(first)).toBeUndefined();
+    expect(buttonLabels(first)).toHaveLength(REPO_PAGE_SIZE);
+    expect(buttonLabels(first)[0]).toBe('1. ★ /elsewhere/x');
+    expect(buttonLabels(first)[1]).toBe('2. p0 (main)');
   });
 });
 

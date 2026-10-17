@@ -28,7 +28,10 @@ The wizard then, with no further web-console work:
 2. Enables the **bot** capability.
 3. Switches **events and card callbacks to the long connection** and
    subscribes `im.message.receive_v1` (event) + `card.action.trigger`
-   (card callback) — both required, verified by read-back (fail-closed).
+   (card callback) — both required, verified by read-back (fail-closed) — plus
+   `application.bot.menu_v6` (bot custom-menu clicks; harmless when no
+   `menuCommands` mapping is configured, and provisioning it here is what makes
+   a menu configured later work without a second setup run).
 4. Grants the manifest's scopes — see the permissions table in step 3.
 5. Publishes an app version with **"visible to me only"** visibility —
    auto-approved, no administrator wait.
@@ -97,6 +100,10 @@ outbound). In **Events & Callbacks** (事件与回调):
 
 - **Events** (事件订阅方式): choose **Long connection** (长连接) and
   subscribe to **Receive messages** (`im.message.receive_v1`, 接收消息).
+  Also subscribe **Bot custom menu** (`application.bot.menu_v6`) if you use
+  `menuCommands`: a menu item whose response action is **推送事件 (push event)**
+  produces this event, and without the subscription the click is never
+  delivered.
 - **Card callbacks** (卡片回调): card button presses are **callbacks, not
   events** — their receive mode is configured **separately**. Switch the
   card callback receive mode to **Long connection** as well (长连接), or
@@ -160,6 +167,36 @@ back):
 | `FEISHU_GROUP_MENTION_MODE` | `always` \| `never` \| `ambient` \| `topic` | group mention policy |
 | `FEISHU_UNKNOWN_COMMAND` | `error` \| `passthrough` | unknown slash-line policy |
 | `FEISHU_LOCALE` | `en-US` \| `zh-CN` | surface language (see below) |
+
+### Bot custom menu
+
+A bot's custom menu (the items above the composer in a 1:1 chat) can respond to
+a click in three ways; only **推送事件 (push event)** reaches this surface, as
+an `application.bot.menu_v6` event. The event names the clicked item's
+developer-defined `event_key` and the operator — **no chat id, no menu name** —
+so the surface needs a mapping from each key to a `cardCommands` entry:
+
+```yaml
+config:
+  appId: cli_xxx
+  appSecret: yyy
+  menuCommands:
+    - eventKey: menu_new_session
+      command: new-session      # a name in cardCommands
+    - eventKey: menu_status
+      command: status
+```
+
+- The referenced `cardCommands` entry still decides WHAT runs (path/argv
+  allowlist, single-flight lock, per-run log) — a menu item can never name a
+  path.
+- The mapping is the whole dispatch: an unmapped `event_key` is logged and
+  dropped, never guessed.
+- A click carries no chat, so it acts in the operator's p2p conversation,
+  learned from their inbound messages and persisted in `p2p-chats.json` under
+  the data directory. On the first click from someone the surface has never
+  seen, it addresses them by open id — the acknowledgement message also teaches
+  it that conversation.
 
 ### Surface language
 

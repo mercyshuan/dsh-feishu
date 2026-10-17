@@ -19,7 +19,7 @@ import {
   type AgentDefaultModelService,
   type AgentPresetRow,
   type AgentPresetsService,
-  type AssistantStreamChunk,
+  type AssistantStreamFrameLike,
   Bridge,
   type BridgeOptions,
   type LlmService,
@@ -78,6 +78,14 @@ class RecordingTransport implements FeishuTransport {
 
   async sendText(chatId: string, text: string): Promise<void> {
     this.sentTexts.push({ chatId, text });
+  }
+  /** Every direct (by open id) send, for the bot-menu learn fallback. */
+  readonly sentToUsers: Array<{ openId: string; text: string }> = [];
+  /** What `sendTextToUser` resolves to (the p2p chat id), when configured. */
+  sendTextToUserImpl?: (openId: string) => string | undefined;
+  async sendTextToUser(openId: string, text: string): Promise<string | undefined> {
+    this.sentToUsers.push({ openId, text });
+    return this.sendTextToUserImpl?.(openId);
   }
   sentFiles: Array<{ chatId: string; fileName: string; content: Uint8Array }> = [];
   async sendFile(chatId: string, fileName: string, content: Uint8Array): Promise<void> {
@@ -264,7 +272,7 @@ interface Harness {
   disposeEvents: () => void;
   emit: (sessionId: string, event: SessionEvent) => void;
   /** Publish one transient `agent/assistant-stream` frame (dsh 0.1.5). */
-  emitStream: (sessionId: string, chunk: AssistantStreamChunk) => void;
+  emitStream: (sessionId: string, frame: AssistantStreamFrameLike) => void;
 }
 
 function makeHarness(
@@ -296,6 +304,9 @@ function makeHarness(
     contextMerge?: NonNullable<BridgeOptions['contextMerge']>;
     cardCommands?: NonNullable<BridgeOptions['cardCommands']>;
     slashCommands?: NonNullable<BridgeOptions['slashCommands']>;
+    menuCommands?: NonNullable<BridgeOptions['menuCommands']>;
+    /** Data directory (durable tables live here); defaults to '/work'. */
+    dataDir?: string;
   } = {},
 ): Harness {
   const transport = new RecordingTransport();
@@ -314,9 +325,9 @@ function makeHarness(
       if (index >= 0) listeners.splice(index, 1);
     };
   };
-  const streamListeners: Array<(sessionId: string, chunk: AssistantStreamChunk) => void> = [];
+  const streamListeners: Array<(sessionId: string, frame: AssistantStreamFrameLike) => void> = [];
   const onAssistantStream = (
-    listener: (sessionId: string, chunk: AssistantStreamChunk) => void,
+    listener: (sessionId: string, frame: AssistantStreamFrameLike) => void,
   ): (() => void) => {
     streamListeners.push(listener);
     return () => {
@@ -333,7 +344,7 @@ function makeHarness(
     onAssistantStream,
     cards,
     defaultCwd: '/work',
-    dataDir: '/work',
+    dataDir: options.dataDir ?? '/work',
     logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
     ...(options.groupMentionMode !== undefined
       ? { groupMentionMode: options.groupMentionMode }
@@ -345,6 +356,7 @@ function makeHarness(
     ...(options.repoRoots !== undefined ? { repoRoots: options.repoRoots } : {}),
     ...(options.cardCommands !== undefined ? { cardCommands: options.cardCommands } : {}),
     ...(options.slashCommands !== undefined ? { slashCommands: options.slashCommands } : {}),
+    ...(options.menuCommands !== undefined ? { menuCommands: options.menuCommands } : {}),
     ...(options.listSessions !== undefined ? { listSessions: options.listSessions } : {}),
     ...(options.permissionPresets !== undefined
       ? { permissionPresets: options.permissionPresets }
@@ -381,8 +393,8 @@ function makeHarness(
     for (const listener of [...listeners]) listener(sessionId, event);
   };
   /** Publish one transient `agent/assistant-stream` frame (dsh 0.1.5). */
-  const emitStream = (sessionId: string, chunk: AssistantStreamChunk): void => {
-    for (const listener of [...streamListeners]) listener(sessionId, chunk);
+  const emitStream = (sessionId: string, frame: AssistantStreamFrameLike): void => {
+    for (const listener of [...streamListeners]) listener(sessionId, frame);
   };
   return {
     transport,
@@ -428,13 +440,17 @@ function groupMessage(mentions: string[], overrides: Partial<FeishuMessage> = {}
   return message({ chatType: 'group', mentions, ...overrides });
 }
 
-function chunkEvent(text: string): SessionEvent {
+/** One live text delta frame (`agent/assistant-stream`, dsh 0.1.5). */
+function chunkEvent(text: string): AssistantStreamFrameLike {
   return {
-    type: 'assistant/chunk',
-    seq: 1,
-    time: 0,
-    data: { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text } },
-  } as unknown as SessionEvent;
+    type: 'chunk',
+    attemptId: 'attempt-1',
+    revision: 1,
+    turn: 0,
+    step: 0,
+    index: 0,
+    chunk: { type: 'text-delta', text },
+  };
 }
 
 function turnEndEvent(
@@ -1054,8 +1070,8 @@ describe('Bridge', () => {
   it('streams chunks into the card and sends the final answer as a fresh message', async () => {
     const h = makeHarness();
     await h.bridge.handleMessage(message());
-    await h.bridge.handleEvent('feishu-session-1', chunkEvent('Hello '));
-    await h.bridge.handleEvent('feishu-session-1', chunkEvent('world'));
+    h.emitStream('feishu-session-1', chunkEvent('Hello '));
+    h.emitStream('feishu-session-1', chunkEvent('world'));
     await h.bridge.handleEvent('feishu-session-1', turnEndEvent());
     // The final card patch carries the accumulated text.
     const last = h.transport.updatedCards.at(-1);
@@ -1073,27 +1089,36 @@ describe('Bridge', () => {
     // session events. Without this channel no think row is ever created, so the
     // folded card degrades to `collapseThought`'s tool-row fallback — the
     // user-facing symptom being "thinking is gone, only the short tool lines".
-    h.emitStream('feishu-session-1', { type: 'reasoning-delta', text: 'weighing the options' });
-    h.emitStream('feishu-session-1', { type: 'text-delta', text: 'the answer' });
+    h.emitStream('feishu-session-1', {
+      type: 'start',
+      attemptId: 'attempt-1',
+      revision: 0,
+      turn: 0,
+      step: 0,
+    });
+    h.emitStream('feishu-session-1', {
+      type: 'chunk',
+      attemptId: 'attempt-1',
+      revision: 1,
+      turn: 0,
+      step: 0,
+      index: 0,
+      chunk: { type: 'reasoning-delta', text: 'weighing the options' },
+    });
+    h.emitStream('feishu-session-1', {
+      type: 'chunk',
+      attemptId: 'attempt-1',
+      revision: 2,
+      turn: 0,
+      step: 0,
+      index: 1,
+      chunk: { type: 'text-delta', text: 'the answer' },
+    });
     await vi.waitFor(() => {
       expect(JSON.stringify(h.transport.updatedCards.at(-1))).toContain('the answer');
     });
     // The folded card shows the CURRENT thinking, not the tool trail.
     expect(JSON.stringify(h.transport.updatedCards.at(-1))).toContain('weighing the options');
-  });
-
-  it('ignores transient frames once the durable chunk channel has been seen', async () => {
-    const h = makeHarness({ throttleMs: 0 });
-    await h.bridge.handleMessage(message());
-    await h.bridge.handleEvent('feishu-session-1', chunkEvent('durable'));
-    h.emitStream('feishu-session-1', { type: 'text-delta', text: 'durable' });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    // Exactly once: a core that also appends the durable event must not have
-    // the same text folded twice through the frame channel.
-    expect(h.transport.updatedCards.at(-1)?.elements).toContainEqual({
-      tag: 'markdown',
-      content: 'durable',
-    });
   });
 
   it('renders tool calls as rows and marks them done on result', async () => {
@@ -1278,7 +1303,7 @@ describe('Bridge', () => {
   it('marks the turn card error and still delivers the final text', async () => {
     const h = makeHarness();
     await h.bridge.handleMessage(message());
-    await h.bridge.handleEvent('feishu-session-1', chunkEvent('oops'));
+    h.emitStream('feishu-session-1', chunkEvent('oops'));
     await h.bridge.handleEvent(
       'feishu-session-1',
       turnEndEvent({ kind: 'error', error: { code: 'MOCK', message: 'boom' } }) as SessionEvent,
@@ -1344,7 +1369,7 @@ describe('Bridge', () => {
   it('copy action resends the last output as text', async () => {
     const h = makeHarness();
     await h.bridge.handleMessage(message());
-    await h.bridge.handleEvent('feishu-session-1', chunkEvent('the answer'));
+    h.emitStream('feishu-session-1', chunkEvent('the answer'));
     await h.bridge.handleEvent('feishu-session-1', turnEndEvent());
     h.transport.sentTexts = [];
     await h.bridge.handleCardAction({
@@ -1566,7 +1591,7 @@ describe('Bridge', () => {
       // aborted turn must read 'Stopped' (DSH web: message.stopped).
       const h = makeHarness({ throttleMs: 0 });
       await h.bridge.handleMessage(message());
-      await h.bridge.handleEvent('feishu-session-1', chunkEvent('partial output'));
+      h.emitStream('feishu-session-1', chunkEvent('partial output'));
       h.agentStore.setStatus('feishu-session-1', 'running');
       await h.bridge.handleCardAction({
         messageId: 'mem-1',
@@ -1634,7 +1659,7 @@ describe('Bridge', () => {
     it('retry after a stopped turn starts a fresh turn with the same prompt', async () => {
       const h = makeHarness({ throttleMs: 0 });
       await h.bridge.handleMessage(message({ text: 'retry me after stop' }));
-      await h.bridge.handleEvent('feishu-session-1', chunkEvent('partial output'));
+      h.emitStream('feishu-session-1', chunkEvent('partial output'));
       h.agentStore.setStatus('feishu-session-1', 'running');
       await h.bridge.handleCardAction({
         messageId: 'mem-1',
@@ -1666,7 +1691,7 @@ describe('Bridge', () => {
       // path must keep re-rendering from the authoritative done state.
       const h = makeHarness({ throttleMs: 0 });
       await h.bridge.handleMessage(message());
-      await h.bridge.handleEvent('feishu-session-1', chunkEvent('answer'));
+      h.emitStream('feishu-session-1', chunkEvent('answer'));
       await h.bridge.handleEvent('feishu-session-1', turnEndEvent());
       await new Promise((resolve) => setTimeout(resolve, 0));
       const doneCard = h.transport.updatedCards.at(-1);
@@ -1752,7 +1777,7 @@ describe('Bridge', () => {
         operatorOpenId: 'ou_user',
         value: { kind: 'agent-prompt', action: 'generate', prompt: 'run image-gen now' },
       });
-      await h.bridge.handleEvent('feishu-session-1', chunkEvent('这个我不做。'));
+      h.emitStream('feishu-session-1', chunkEvent('这个我不做。'));
       await h.bridge.handleEvent(
         'feishu-session-1',
         turnEndEvent({ kind: 'completed' }) as SessionEvent,
@@ -1888,7 +1913,7 @@ describe('Bridge', () => {
     it('a second message during a running turn opens a fresh card (lifecycle)', async () => {
       const h = makeHarness({ throttleMs: 0 });
       await h.bridge.handleMessage(message());
-      await h.bridge.handleEvent('feishu-session-1', chunkEvent('partial'));
+      h.emitStream('feishu-session-1', chunkEvent('partial'));
       // Second message → new turn card; the old one is finalized as done.
       await h.bridge.handleMessage(message({ messageId: 'om_msg2', text: 'second' }));
       const cards = h.transport.sentCards;
@@ -2061,7 +2086,7 @@ describe('Bridge', () => {
     it('working × copy → nothing to copy (turn not finished); × retry → new turn', async () => {
       const h = makeHarness({ throttleMs: 0 });
       await h.bridge.handleMessage(message());
-      await h.bridge.handleEvent('feishu-session-1', chunkEvent('partial'));
+      h.emitStream('feishu-session-1', chunkEvent('partial'));
       await h.bridge.handleCardAction({
         messageId: 'mem-1',
         chatId: 'oc_chat',
@@ -2083,7 +2108,7 @@ describe('Bridge', () => {
     it('done × stop → idle explanation; × copy → last output; × retry → new turn', async () => {
       const h = makeHarness({ throttleMs: 0 });
       await h.bridge.handleMessage(message());
-      await h.bridge.handleEvent('feishu-session-1', chunkEvent('the answer'));
+      h.emitStream('feishu-session-1', chunkEvent('the answer'));
       await h.bridge.handleEvent('feishu-session-1', turnEndEvent());
       await new Promise((resolve) => setTimeout(resolve, 0));
       h.agentStore.setStatus('feishu-session-1', 'idle');
@@ -2113,7 +2138,7 @@ describe('Bridge', () => {
     it('error × stop/copy/retry/panel/toggle/row-details — all safe, card stays error', async () => {
       const h = makeHarness({ throttleMs: 0 });
       await h.bridge.handleMessage(message());
-      await h.bridge.handleEvent('feishu-session-1', chunkEvent('oops'));
+      h.emitStream('feishu-session-1', chunkEvent('oops'));
       await h.bridge.handleEvent(
         'feishu-session-1',
         turnEndEvent({ kind: 'error', error: { code: 'MOCK', message: 'boom' } }) as SessionEvent,
@@ -2185,14 +2210,14 @@ describe('Bridge', () => {
     it('done → new message → working (fresh card) → second done: cross-turn integrity', async () => {
       const h = makeHarness({ throttleMs: 0 });
       await h.bridge.handleMessage(message());
-      await h.bridge.handleEvent('feishu-session-1', chunkEvent('first answer'));
+      h.emitStream('feishu-session-1', chunkEvent('first answer'));
       await h.bridge.handleEvent('feishu-session-1', turnEndEvent());
       await new Promise((resolve) => setTimeout(resolve, 0));
       // Second message: new turn/card, collapsed again, new content.
       await h.bridge.handleMessage(message({ messageId: 'om_msg2', text: 'second question' }));
       const second = h.transport.sentCards.at(-1);
       expect(second?.header?.title.content).toBe('second question');
-      await h.bridge.handleEvent('feishu-session-1', chunkEvent('second answer'));
+      h.emitStream('feishu-session-1', chunkEvent('second answer'));
       await h.bridge.handleEvent('feishu-session-1', turnEndEvent());
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(h.transport.updatedCards.at(-1)?.header?.template).toBe('green');
@@ -2209,7 +2234,7 @@ describe('Bridge', () => {
     it('error → retry → working → done: full recovery cycle', async () => {
       const h = makeHarness({ throttleMs: 0 });
       await h.bridge.handleMessage(message());
-      await h.bridge.handleEvent('feishu-session-1', chunkEvent('partial'));
+      h.emitStream('feishu-session-1', chunkEvent('partial'));
       await h.bridge.handleEvent(
         'feishu-session-1',
         turnEndEvent({ kind: 'error', error: { code: 'MOCK', message: 'boom' } }) as SessionEvent,
@@ -2223,7 +2248,7 @@ describe('Bridge', () => {
         operatorOpenId: 'ou_user',
         value: { kind: 'retry' },
       });
-      await h.bridge.handleEvent('feishu-session-1', chunkEvent('recovered'));
+      h.emitStream('feishu-session-1', chunkEvent('recovered'));
       await h.bridge.handleEvent('feishu-session-1', turnEndEvent());
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(h.transport.updatedCards.at(-1)?.header?.template).toBe('green');
@@ -2684,6 +2709,40 @@ describe('working directory commands', () => {
     } else {
       expect.fail('expected a dropdown picker card');
     }
+  });
+
+  it('/repo remembers the picked working directory on reopen (preselected dropdown)', async () => {
+    const h = makeHarness({ repoRoots: [join(SCRATCH, 'projects')] });
+    const { mkdirSync, writeFileSync } = await import('node:fs');
+    const root = join(SCRATCH, 'projects');
+    for (const name of ['proj-a', 'proj-b']) {
+      mkdirSync(join(root, name, '.git'), { recursive: true });
+      writeFileSync(join(root, name, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    }
+    // First pick pins proj-a; reopening /repo must PRESELECT it (the bug was
+    // a bare placeholder with no memory of the choice).
+    await h.bridge.handleMessage(message({ text: '/repo' }));
+    await h.bridge.handleCardAction({
+      messageId: 'msg-1',
+      chatId: 'oc_chat',
+      operatorOpenId: 'ou_user',
+      value: { kind: 'repo-pick' },
+      option: join(root, 'proj-a'),
+    });
+    expect(h.sessionMap.cwdFor('oc_chat')).toBe(join(root, 'proj-a'));
+
+    await h.bridge.handleMessage(message({ text: '/repo' }));
+    const reopened = findCardByTitle(h, (title) => title.includes('Pick a project'));
+    const action = reopened?.elements.find((el) => el.tag === 'action');
+    const select = action && 'actions' in action ? action.actions[0] : undefined;
+    if (select?.tag !== 'select_static') {
+      expect.fail('expected a dropdown picker card');
+    } else {
+      expect(select.initial_option).toBe(join(root, 'proj-a'));
+      expect(select.options.map((option) => option.value)).toContain(join(root, 'proj-a'));
+    }
+    const note = reopened?.elements.find((el) => el.tag === 'note');
+    expect(note?.elements[0]?.content).toContain(join(root, 'proj-a'));
   });
 });
 
@@ -3429,6 +3488,166 @@ describe('panel command palette', () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     expect(readFileSync(out, 'utf8')).toBe('oc_chat');
+  });
+
+  it('runs the command mapped to a bot menu event_key (no agent turn)', async () => {
+    // Never point a spawned child at the harness SCRATCH.
+    const out = join(mkdtempSync(`${tmpdir()}/dsh-feishu-bot-menu-`), 'out.txt');
+    const h = makeHarness({
+      cardCommands: [
+        {
+          name: 'image-gen-create',
+          file: process.execPath,
+          args: [
+            '-e',
+            'require("node:fs").writeFileSync(process.argv[1], process.argv[2])',
+            out,
+            '{chat}',
+          ],
+        },
+      ],
+      menuCommands: [{ eventKey: 'imagecard', command: 'image-gen-create', args: [] }],
+    });
+    // A menu event carries NO chat id (the custom menu is p2p-only): the surface
+    // learns the conversation from the operator's own p2p message.
+    await h.bridge.handleMessage(message());
+    const followupsBefore = h.agentStore.followups.get('feishu-session-1')?.length ?? 0;
+    await h.bridge.handleBotMenu({
+      eventKey: 'imagecard',
+      operatorOpenId: 'ou_user',
+      eventId: 'evt-menu-1',
+    });
+    // The command's argv came from config; nothing went to the agent, and a
+    // successful run is silent (the card the command posts IS the feedback).
+    expect(h.agentStore.followups.get('feishu-session-1')?.length ?? 0).toBe(followupsBefore);
+    expect(h.transport.sentTexts).toHaveLength(0);
+    for (let i = 0; i < 200 && !existsSync(out); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(readFileSync(out, 'utf8')).toBe('oc_chat');
+  });
+
+  it('drops a menu event_key that has no mapping (and says so in the log)', async () => {
+    const h = makeHarness({ cardCommands: [], menuCommands: [] });
+    await h.bridge.handleMessage(message());
+    await h.bridge.handleBotMenu({
+      eventKey: 'not_configured',
+      operatorOpenId: 'ou_user',
+      eventId: 'evt-menu-2',
+    });
+    // An unmapped key runs nothing and touches no conversation; the warn line
+    // is the whole point of routing clicks through this seam.
+    expect(h.transport.sentTexts).toHaveLength(0);
+  });
+
+  it('ignores a redelivered menu event id', async () => {
+    const out = join(mkdtempSync(`${tmpdir()}/dsh-feishu-bot-menu-dedup-`), 'out.txt');
+    const h = makeHarness({
+      cardCommands: [
+        {
+          name: 'mark',
+          file: process.execPath,
+          args: ['-e', 'require("node:fs").appendFileSync(process.argv[1], "x")', out],
+        },
+      ],
+      menuCommands: [{ eventKey: 'k', command: 'mark', args: [] }],
+    });
+    await h.bridge.handleMessage(message());
+    const click = { eventKey: 'k', operatorOpenId: 'ou_user', eventId: 'evt-same' };
+    await h.bridge.handleBotMenu(click);
+    for (let i = 0; i < 200 && !existsSync(out); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    // Same event id = a platform redelivery, not a second click: it must not
+    // run the command again. (Dedup keys on the EVENT id, never on the key —
+    // a genuine second click arrives with a new id.)
+    await h.bridge.handleBotMenu(click);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(readFileSync(out, 'utf8')).toBe('x');
+  });
+
+  it('does not run a mapped menu command without a known p2p conversation', async () => {
+    const h = makeHarness({
+      cardCommands: [{ name: 'noop', file: process.execPath, args: ['-e', 'process.exit(0)'] }],
+      menuCommands: [{ eventKey: 'k', command: 'noop', args: [] }],
+    });
+    // No inbound message yet: the surface knows no chat for this operator and
+    // the event carries none, so there is nowhere to act.
+    await h.bridge.handleBotMenu({
+      eventKey: 'k',
+      operatorOpenId: 'ou_stranger',
+      eventId: 'evt-menu-3',
+    });
+    expect(h.transport.sentTexts).toHaveLength(0);
+  });
+
+  it("learns the operator's p2p chat by addressing them directly", async () => {
+    const dir = mkdtempSync(`${tmpdir()}/dsh-feishu-bot-menu-learn-`);
+    const out = join(dir, 'out.txt');
+    const h = makeHarness({
+      dataDir: join(dir, 'data'),
+      cardCommands: [
+        {
+          name: 'image-gen-create',
+          file: process.execPath,
+          args: [
+            '-e',
+            'require("node:fs").writeFileSync(process.argv[1], process.argv[2])',
+            out,
+            '{chat}',
+          ],
+        },
+      ],
+      menuCommands: [{ eventKey: 'imagecard', command: 'image-gen-create', args: [] }],
+    });
+    h.transport.sendTextToUserImpl = () => 'oc_learned';
+    // No inbound message: the surface knows no chat for this operator, so it
+    // addresses them BY OPEN ID instead of giving up. The platform's answer is
+    // both the acknowledgement and the learned binding.
+    await h.bridge.handleBotMenu({
+      eventKey: 'imagecard',
+      operatorOpenId: 'ou_new',
+      eventId: 'evt-learn',
+    });
+    expect(h.transport.sentToUsers).toHaveLength(1);
+    expect(h.transport.sentToUsers[0]?.openId).toBe('ou_new');
+    for (let i = 0; i < 200 && !existsSync(out); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(readFileSync(out, 'utf8')).toBe('oc_learned');
+  });
+
+  it('keeps the learned p2p chat across a restart', async () => {
+    const dir = mkdtempSync(`${tmpdir()}/dsh-feishu-bot-menu-persist-`);
+    const dataDir = join(dir, 'data');
+    const out = join(dir, 'out.txt');
+    const command = {
+      name: 'image-gen-create',
+      file: process.execPath,
+      args: [
+        '-e',
+        'require("node:fs").writeFileSync(process.argv[1], process.argv[2])',
+        out,
+        '{chat}',
+      ],
+    };
+    const menuCommands = [{ eventKey: 'imagecard', command: 'image-gen-create', args: [] }];
+
+    const first = makeHarness({ dataDir, cardCommands: [command], menuCommands });
+    await first.bridge.handleMessage(message());
+    // A fresh process (same data dir, no inbound message yet) must still be
+    // able to act on a click — that is the whole point of persisting the table.
+    const second = makeHarness({ dataDir, cardCommands: [command], menuCommands });
+    await second.bridge.handleBotMenu({
+      eventKey: 'imagecard',
+      operatorOpenId: 'ou_user',
+      eventId: 'evt-after-restart',
+    });
+    for (let i = 0; i < 200 && !existsSync(out); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(readFileSync(out, 'utf8')).toBe('oc_chat');
+    expect(second.transport.sentToUsers).toHaveLength(0);
   });
 
   it('the image-card button reports a missing allowlist entry instead of failing silently', async () => {
@@ -5666,7 +5885,7 @@ describe('two-stage reaction ack', () => {
   it('swaps to DONE when the turn completes', async () => {
     const h = makeHarness({ throttleMs: 0 });
     await h.bridge.handleMessage(message());
-    await h.bridge.handleEvent('feishu-session-1', chunkEvent('answer'));
+    h.emitStream('feishu-session-1', chunkEvent('answer'));
     await h.bridge.handleEvent('feishu-session-1', turnEndEvent());
     await new Promise((resolve) => setTimeout(resolve, 0));
     const actions = h.transport.reactions.filter(
@@ -5711,7 +5930,7 @@ describe('two-stage reaction ack', () => {
       throw new Error('reaction api down');
     };
     await h.bridge.handleMessage(message());
-    await h.bridge.handleEvent('feishu-session-1', chunkEvent('answer'));
+    h.emitStream('feishu-session-1', chunkEvent('answer'));
     await h.bridge.handleEvent('feishu-session-1', turnEndEvent());
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(h.transport.updatedCards.at(-1)?.header?.template).toBe('green');
@@ -5852,7 +6071,7 @@ describe('agent-initiated turns (schedule reminders)', () => {
     const h = makeHarness({ throttleMs: 0 });
     h.sessionMap.set('oc_chat', 'feishu-session-1');
     await h.bridge.handleEvent('feishu-session-1', pluginUserMessage());
-    await h.bridge.handleEvent('feishu-session-1', chunkEvent('reminder answer'));
+    h.emitStream('feishu-session-1', chunkEvent('reminder answer'));
     await h.bridge.handleEvent('feishu-session-1', turnEndEvent());
     const opened = h.transport.sentCards.at(-1);
     expect(opened?.header?.title.content).toBe('⏰ Reminder');
@@ -5866,7 +6085,7 @@ describe('agent-initiated turns (schedule reminders)', () => {
     const h = makeHarness({ throttleMs: 0 });
     h.sessionMap.set('oc_chat', 'feishu-session-1');
     await h.bridge.handleEvent('feishu-session-1', userUserMessage());
-    await h.bridge.handleEvent('feishu-session-1', chunkEvent('stale output'));
+    h.emitStream('feishu-session-1', chunkEvent('stale output'));
     expect(h.transport.sentCards).toHaveLength(0);
   });
 

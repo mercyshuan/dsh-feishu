@@ -361,19 +361,30 @@ The harness sandbox (and this checkout's environment) has specific rules:
 ## Assistant-stream deltas moved to a process-local frame (dsh 0.1.5)
 
 - A dsh 0.1.5 core no longer appends the incremental assistant deltas as the
-  durable `assistant/chunk` session event; the agent loop publishes them as
-  transient `agent/assistant-stream` dispatch frames instead
-  (`dsh-agent-loop`: `dispatch.emit('agent/assistant-stream', { frame })`, whose
-  `frame.chunk` is the very `StreamChunk` the durable event used to carry). A
+  durable `assistant/chunk` session event (the type is gone from
+  `SessionEvent`, and no core appends it any more); the agent loop publishes
+  them as transient `agent/assistant-stream` dispatch frames instead
+  (`dsh-agent-loop`: `dispatch.emit('agent/assistant-stream', { frame })`). A
   surface subscribed only to `session/event` therefore receives **no stream at
   all** on 0.1.5 — no `reasoning-delta`, so no think row is ever created and the
   folded card falls back to `collapseThought`'s last-row line (the tool trail):
   the user sees "thinking is gone, only the short tool lines remain", and the
   answer appears in one piece instead of streaming.
-- This bundle now subscribes to BOTH channels — the durable event (0.1.2) and
-  the dispatch frame (0.1.5) — folding the frame's `chunk` back into the same
-  controller branch. The two are told apart by the committed `seq` a durable
-  event carries, so a core publishing both cannot fold the same text twice.
+- The frame is a THREE-state publication (`start` / `chunk` / `end`), NOT a bare
+  chunk, and it carries the attempt id plus a monotone `revision` ("replacement
+  restarts at 1"). Folding only `frame.chunk` loses every boundary: the
+  reasoning of successive attempts lands in ONE think row, and a frame a
+  replaced lifecycle replays from an older revision appends the same text a
+  second time. Forward the WHOLE frame — `start` opens a new publication and
+  resets the revision baseline (comparing it against the previous stream's
+  revision would drop the new attempt and every delta after it), an older
+  revision of the same attempt is dropped, `end` settles that attempt's think
+  row, and a new turn forgets the previous turn's baseline so nothing from a
+  finished turn can suppress the next one.
+- A failed / retried / cancelled attempt commits `assistant/attempt` instead of
+  `assistant/message`: it streamed content the user already saw but published no
+  surface message, so it must NOT overwrite the card's live text — it only
+  settles the open think row.
 - The degradation is SILENT: nothing fails, the answer still renders, and only
   the reasoning row goes missing. Re-check the host event contract after every
   core upgrade rather than waiting for a report.

@@ -509,7 +509,7 @@ const CONSOLE_PAGE_HTML =
   '<script>window.user = {"id":"ou_creator","name":"Ada","tenantId":"t1","tenantDisplayName":{"value":"ACME"}};</script>';
 
 interface FakeFetcherOptions {
-  /** Initial event subscriptions (default: mode 4 + im.message.receive_v1). */
+  /** Initial event subscriptions (default: mode 4 + every required event). */
   eventState?: { eventMode?: number; events: string[] };
   /** Initial callback subscriptions (default: mode 4 + card.action.trigger). */
   callbackState?: { callbackMode?: number; callbacks: string[] };
@@ -527,7 +527,7 @@ function createFakeFetcher(options: FakeFetcherOptions = {}): {
   const requests: Array<{ url: string; body?: unknown }> = [];
   let uploadedFile: Buffer | undefined;
   let eventMode = options.eventState?.eventMode ?? LONG_CONNECTION_EVENT_MODE;
-  let events = [...(options.eventState?.events ?? ['im.message.receive_v1'])];
+  let events = [...(options.eventState?.events ?? [...APP_EVENTS])];
   let callbackMode = options.callbackState?.callbackMode ?? LONG_CONNECTION_EVENT_MODE;
   let callbacks = [...(options.callbackState?.callbacks ?? ['card.action.trigger'])];
   const applyUpdates = options.applyUpdates !== false;
@@ -631,7 +631,7 @@ describe('configureFeishuApp', () => {
     const client = await makeClient(fetcher);
     const result = await configureFeishuApp(client, 'cli_app', { publish: true });
     expect(result.ok).toBe(true);
-    expect(result.subscribedEventCount).toBe(2);
+    expect(result.subscribedEventCount).toBe(3);
     expect(result.versionId).toBe('v_1');
     const paths = requests.map((r) => r.url);
     expect(paths).toContain('/developers/v1/robot/switch/cli_app');
@@ -656,7 +656,9 @@ describe('configureFeishuApp', () => {
     const result = await configureFeishuApp(client, 'cli_app', { publish: false });
     expect(result.ok).toBe(true);
     const eventUpdate = requests.find((r) => r.url.startsWith('/developers/v1/event/update/'));
-    expect(eventUpdate?.body).toMatchObject({ appEvents: ['im.message.receive_v1'] });
+    expect(eventUpdate?.body).toMatchObject({
+      appEvents: ['im.message.receive_v1', 'application.bot.menu_v6'],
+    });
     const callbackUpdate = requests.find((r) =>
       r.url.startsWith('/developers/v1/callback/update/'),
     );

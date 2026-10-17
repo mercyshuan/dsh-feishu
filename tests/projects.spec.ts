@@ -103,7 +103,12 @@ describe('scanProjects', () => {
   it('caps the walk with the default dir budget', async () => {
     expect(DEFAULT_MAX_SCAN_DIRS).toBeGreaterThan(0);
     for (let i = 0; i < 20; i += 1) makeRepo(`bulk${i}`);
-    const projects = await scanProjects(SCRATCH);
+    // This fixture is 20 real checkouts and every one costs git calls, so a
+    // full-suite run on a loaded machine can trip the default 4s WALL-CLOCK
+    // budget and drop the last repo. The assertion is about the default DIR
+    // budget (left untouched), so widen only the time budget: otherwise a
+    // green machine looks red for a reason this test never meant to measure.
+    const projects = await scanProjects(SCRATCH, 3, { maxScanMs: 60_000 });
     expect(projects.length).toBe(20);
   });
 });

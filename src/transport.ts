@@ -26,6 +26,7 @@ import {
 } from '@larksuiteoapi/node-sdk';
 import axios from 'axios';
 import type {
+  BotMenuClick,
   CardAction,
   CardJson,
   ChatStats,
@@ -430,6 +431,71 @@ export function normalizeCardAction(data: RawCardActionEvent): CardAction | unde
 }
 
 /**
+ * The `application.bot.menu_v6` payload as the SDK delivers it.
+ *
+ * The SDK flattens the v2.0 envelope (header fields and the `event` body both
+ * land at the top level), which is what its own `IHandles` declaration
+ * describes. The nested shape is accepted too — a payload that arrives
+ * un-flattened must not silently become "no menu click".
+ */
+export interface RawBotMenuEvent {
+  readonly event_id?: string;
+  readonly event_type?: string;
+  readonly create_time?: string;
+  readonly app_id?: string;
+  readonly tenant_key?: string;
+  /** Developer-defined menu item key — flattened position. */
+  readonly event_key?: string;
+  /** Click timestamp — flattened position (platform sends seconds). */
+  readonly timestamp?: number;
+  readonly operator?: RawBotMenuOperator;
+  /** v2.0 envelope, for a payload that was NOT flattened. */
+  readonly header?: { readonly event_id?: string; readonly create_time?: string };
+  readonly event?: {
+    readonly event_key?: string;
+    readonly timestamp?: number;
+    readonly operator?: RawBotMenuOperator;
+  };
+}
+
+/** The operator block of a bot-menu event. */
+interface RawBotMenuOperator {
+  readonly operator_name?: string;
+  readonly operator_id?: {
+    readonly open_id?: string;
+    readonly union_id?: string;
+    readonly user_id?: string;
+  };
+}
+
+/**
+ * Normalize a raw `application.bot.menu_v6` payload into a surface click, or
+ * `undefined` when it carries no event key (nothing can be dispatched without
+ * one, and guessing a target would be worse than saying so). Pure function —
+ * unit-testable without any SDK connection.
+ *
+ * Both payload shapes are read (flat first, then `event`), so the same code
+ * works whichever way the SDK hands the event over.
+ * @param data - the raw menu event payload.
+ * @returns the normalized click, or `undefined` to ignore.
+ */
+export function normalizeBotMenuEvent(data: RawBotMenuEvent): BotMenuClick | undefined {
+  const body = data.event ?? data;
+  const eventKey = body.event_key ?? '';
+  if (eventKey === '') return undefined;
+  const operator = body.operator ?? data.operator;
+  const operatorName = operator?.operator_name ?? '';
+  const timestamp = body.timestamp ?? data.timestamp;
+  return {
+    eventKey,
+    operatorOpenId: operator?.operator_id?.open_id ?? '',
+    ...(operatorName !== '' ? { operatorName } : {}),
+    eventId: data.event_id ?? data.header?.event_id ?? '',
+    ...(timestamp !== undefined ? { timestamp } : {}),
+  };
+}
+
+/**
  * The Feishu transport: long-connection receive + API send/update.
  */
 export class LarkTransport implements FeishuTransport {
@@ -448,6 +514,7 @@ export class LarkTransport implements FeishuTransport {
   private readonly dispatcher = new EventDispatcher({});
   private handler: ((message: FeishuMessage) => void) | undefined;
   private actionHandler: ((action: CardAction) => void) | undefined;
+  private menuHandler: ((click: BotMenuClick) => void) | undefined;
   private readonly logger: TransportLogger | undefined;
   private botOpenIdValue: string | undefined;
   /** Bot-open-id bookkeeping: attempts spent, in-flight call, pending retry. */
@@ -530,6 +597,32 @@ export class LarkTransport implements FeishuTransport {
         // response the Feishu client rejects as an invalid ACK (botmux
         // lesson: the client can then re-render the card to a stale state —
         // exactly the "card reverted to working after opening details" bug).
+        return {};
+      },
+      'application.bot.menu_v6': (data) => {
+        // A custom-menu click. The event reaches the surface ONLY when the menu
+        // item's response action is "推送事件" (push event) — a link or
+        // text-message item never produces one.
+        const click = normalizeBotMenuEvent(data);
+        if (click === undefined) {
+          // Same reasoning as the card branch: a payload we cannot read must
+          // leave a trace, never a silent no-op.
+          this.logger?.warn(
+            `application.bot.menu_v6 ignored (no event_key): ${JSON.stringify(data).slice(0, 1200)}`,
+          );
+        } else if (this.menuHandler === undefined) {
+          // The exact bug that made this seam exist: the platform IS delivering
+          // menu clicks, but nobody registered a consumer, so a click did
+          // nothing and the log said nothing useful. Name the key so the
+          // console's menu configuration can be matched against the code.
+          this.logger?.warn(
+            `application.bot.menu_v6 received but no menu handler is registered: event_key=${click.eventKey} operator=${click.operatorOpenId}`,
+          );
+        } else {
+          this.menuHandler(click);
+        }
+        // ACK. A menu click has no card to update; an empty object keeps the
+        // SDK's response shape uniform with the card branch.
         return {};
       },
     });
@@ -799,10 +892,40 @@ export class LarkTransport implements FeishuTransport {
     this.actionHandler = handler;
   }
 
+  /** Register the single bot-custom-menu handler (last registration wins). */
+  onBotMenu(handler: (click: BotMenuClick) => void): void {
+    this.menuHandler = handler;
+  }
+
   /** Send a plain text message to a chat. */
   async sendText(chatId: string, text: string): Promise<void> {
     this.logger?.debug(`transport sendText -> ${chatId}: ${text.slice(0, 80)}`);
     await this.createMessage(chatId, 'text', JSON.stringify({ text }));
+  }
+
+  /**
+   * Send a plain text message to a PERSON (by open id) and report the p2p chat
+   * it landed in.
+   *
+   * This exists because a bot custom-menu click names only the operator: the
+   * event carries no chat id, so a surface that has not yet learned the
+   * operator's conversation has no chat to act in. Addressing the message by
+   * `open_id` makes the platform resolve (or open) the p2p chat, and its
+   * response hands back that chat id — so the very message that tells the user
+   * "your click was received" also teaches the surface where to work.
+   * @param openId - the recipient's app-scoped open id.
+   * @param text - the message body.
+   * @returns the p2p chat id, or `undefined` when the response carried none.
+   */
+  async sendTextToUser(openId: string, text: string): Promise<string | undefined> {
+    this.logger?.debug(`transport sendTextToUser -> ${openId}: ${text.slice(0, 80)}`);
+    const response = await this.client.im.v1.message.create({
+      data: { receive_id: openId, msg_type: 'text', content: JSON.stringify({ text }) },
+      params: { receive_id_type: 'open_id' },
+    });
+    this.assertOk(response, 'im.v1.message.create (open_id)');
+    const chatId = (response.data as { chat_id?: string } | undefined)?.chat_id;
+    return chatId !== undefined && chatId !== '' ? chatId : undefined;
   }
 
   /** Upload a file and deliver it as a file message (`/export`). */

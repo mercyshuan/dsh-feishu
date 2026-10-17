@@ -9,6 +9,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { SessionEvent } from '@deepseek-ai/dsh-session';
 import { describe, expect, it } from 'vitest';
 import {
+  type AssistantStreamFrameLike,
   friendlyTurnError,
   StreamingCardController,
   type StreamingCardHost,
@@ -165,11 +166,17 @@ function makeController(): {
   };
 }
 
-function chunkEvent(text: string): SessionEvent {
+/** One live text delta frame (`agent/assistant-stream`). */
+function chunkEvent(text: string): AssistantStreamFrameLike {
   return {
-    type: 'assistant/chunk',
-    data: { chunk: { type: 'text-delta', text } },
-  } as unknown as SessionEvent;
+    type: 'chunk',
+    attemptId: 'attempt-1',
+    revision: 1,
+    turn: 0,
+    step: 0,
+    index: 0,
+    chunk: { type: 'text-delta', text },
+  };
 }
 
 function turnEndEvent(reason: { kind: 'completed' | 'error' | 'aborted' }): SessionEvent {
@@ -182,12 +189,17 @@ function turnEndEvent(reason: { kind: 'completed' | 'error' | 'aborted' }): Sess
   } as unknown as SessionEvent;
 }
 
-/** A reasoning delta (opens/folds into a think row — makes hasRows true). */
-function reasoningEvent(text: string): SessionEvent {
+/** A live reasoning delta frame (opens/folds into a think row). */
+function reasoningEvent(text: string): AssistantStreamFrameLike {
   return {
-    type: 'assistant/chunk',
-    data: { chunk: { type: 'reasoning-delta', text } },
-  } as unknown as SessionEvent;
+    type: 'chunk',
+    attemptId: 'attempt-1',
+    revision: 1,
+    turn: 0,
+    step: 0,
+    index: 0,
+    chunk: { type: 'reasoning-delta', text },
+  };
 }
 
 /** The last card rendered by the streaming manager (a CardJson render). */
@@ -217,8 +229,8 @@ describe('StreamingCardController', () => {
   it('folds chunks into the card and settles on turn/end', async () => {
     const h = makeController();
     await h.controller.beginTurn('oc_chat', 'om-1', 'T');
-    await h.controller.handleEvent('feishu-session-1', chunkEvent('Hello'));
-    await h.controller.handleEvent('feishu-session-1', chunkEvent(' world'));
+    await h.controller.handleAssistantStream('feishu-session-1', chunkEvent('Hello'));
+    await h.controller.handleAssistantStream('feishu-session-1', chunkEvent(' world'));
     expect(h.controller.state('oc_chat')?.content).toBe('Hello world');
     await h.controller.handleEvent('feishu-session-1', turnEndEvent({ kind: 'completed' }));
     expect(h.controller.state('oc_chat')?.status).toBe('done');
@@ -226,6 +238,106 @@ describe('StreamingCardController', () => {
     // The terminal reaction swapped received → done.
     const terminal = h.transport.reactions.filter((r) => r.action === 'add');
     expect(terminal.map((r) => r.emojiType)).toEqual(['GoGoGo', 'DONE']);
+  });
+
+  it('drops a replayed frame from an older revision of the same attempt', async () => {
+    const h = makeController();
+    await h.controller.beginTurn('oc_chat', 'om-1', 'T');
+    await h.controller.handleAssistantStream('feishu-session-1', chunkEvent('live'));
+    await h.controller.handleAssistantStream('feishu-session-1', {
+      type: 'chunk',
+      attemptId: 'attempt-1',
+      revision: 2,
+      turn: 0,
+      step: 0,
+      index: 1,
+      chunk: { type: 'text-delta', text: ' newer' },
+    });
+    // A replaced lifecycle replays its frames from revision 1, so a frame
+    // older than the latest seen for the same attempt must not append twice.
+    await h.controller.handleAssistantStream('feishu-session-1', {
+      type: 'chunk',
+      attemptId: 'attempt-1',
+      revision: 1,
+      turn: 0,
+      step: 0,
+      index: 0,
+      chunk: { type: 'text-delta', text: 'live' },
+    });
+    expect(h.controller.state('oc_chat')?.content).toBe('live newer');
+  });
+
+  it('settles the open think row when a live attempt ends', async () => {
+    const h = makeController();
+    await h.controller.beginTurn('oc_chat', 'om-1', 'T');
+    await h.controller.handleAssistantStream('feishu-session-1', reasoningEvent('thinking…'));
+    expect(h.controller.state('oc_chat')?.openThinkId).toBeDefined();
+    await h.controller.handleAssistantStream('feishu-session-1', {
+      type: 'end',
+      attemptId: 'attempt-1',
+      revision: 2,
+      index: 1,
+      outcome: { kind: 'committed' },
+    });
+    // Reasoning belongs to ONE attempt: the next attempt opens a fresh row
+    // instead of appending into the settled one.
+    expect(h.controller.state('oc_chat')?.openThinkId).toBeUndefined();
+  });
+
+  it('a start frame resets the attempt revision baseline (replacement)', async () => {
+    const h = makeController();
+    await h.controller.beginTurn('oc_chat', 'om-1', 'T');
+    await h.controller.handleAssistantStream('feishu-session-1', {
+      ...chunkEvent('first'),
+      revision: 3,
+    });
+    expect(h.controller.state('oc_chat')?.content).toBe('first');
+    // A replacement restarts `revision` at 1: its start frame opens the new
+    // publication and resets the baseline, so its deltas still land instead of
+    // being dropped as "older than 3".
+    await h.controller.handleAssistantStream('feishu-session-1', {
+      type: 'start',
+      attemptId: 'attempt-1',
+      revision: 1,
+      turn: 0,
+      step: 1,
+    });
+    await h.controller.handleAssistantStream('feishu-session-1', {
+      ...chunkEvent(' again'),
+      revision: 1,
+    });
+    expect(h.controller.state('oc_chat')?.content).toBe('first again');
+  });
+
+  it('a new turn forgets the previous attempt baseline', async () => {
+    const h = makeController();
+    await h.controller.beginTurn('oc_chat', 'om-1', 'T');
+    await h.controller.handleAssistantStream('feishu-session-1', {
+      ...chunkEvent('one'),
+      revision: 5,
+    });
+    await h.controller.handleEvent('feishu-session-1', turnEndEvent({ kind: 'completed' }));
+    // The next turn streams its own revision sequence: nothing from the
+    // finished turn may suppress it.
+    await h.controller.beginTurn('oc_chat', 'om-2', 'T2');
+    await h.controller.handleAssistantStream('feishu-session-1', chunkEvent('two'));
+    expect(h.controller.state('oc_chat')?.content).toBe('two');
+  });
+
+  it('assistant/attempt closes the think row without overwriting live text', async () => {
+    const h = makeController();
+    await h.controller.beginTurn('oc_chat', 'om-1', 'T');
+    await h.controller.handleAssistantStream('feishu-session-1', reasoningEvent('first try…'));
+    await h.controller.handleAssistantStream('feishu-session-1', chunkEvent('partial answer'));
+    expect(h.controller.state('oc_chat')?.openThinkId).toBeDefined();
+    // A failed / retried attempt commits no surface message: it must not
+    // overwrite what the user already saw, only close the open think row.
+    await h.controller.handleEvent('feishu-session-1', {
+      type: 'assistant/attempt',
+      data: { turn: 0, step: 0, stream: [] },
+    } as unknown as SessionEvent);
+    expect(h.controller.state('oc_chat')?.openThinkId).toBeUndefined();
+    expect(h.controller.state('oc_chat')?.content).toBe('partial answer');
   });
 
   it('turn/end with an error marks the card error and notifies', async () => {
@@ -252,7 +364,7 @@ describe('StreamingCardController', () => {
     const h = makeController();
     await h.controller.beginTurn('oc_chat', 'om-1', 'T');
     h.controller.rememberPrompt('oc_chat', 'retry me');
-    await h.controller.handleEvent('feishu-session-1', chunkEvent('answer'));
+    await h.controller.handleAssistantStream('feishu-session-1', chunkEvent('answer'));
     await h.controller.handleEvent('feishu-session-1', turnEndEvent({ kind: 'completed' }));
     await h.controller.handleStreamingAction(action('copy'));
     expect(h.transport.sentTexts.some((t) => t.text === 'answer')).toBe(true);
@@ -288,7 +400,7 @@ describe('StreamingCardController', () => {
   it('toggle-rows flips the collapsed bit and re-renders', async () => {
     const h = makeController();
     await h.controller.beginTurn('oc_chat', 'om-1', 'T');
-    await h.controller.handleEvent('feishu-session-1', reasoningEvent('thinking…'));
+    await h.controller.handleAssistantStream('feishu-session-1', reasoningEvent('thinking…'));
     expect(h.controller.state('oc_chat')?.collapsed).toBe(true);
     // A real callback carries the message id of the card that was clicked
     // (here: the live card just posted by beginTurn — RecordingTransport
@@ -306,7 +418,7 @@ describe('StreamingCardController', () => {
     // expand/collapse button), finish it, expand it so the frozen render
     // ends expanded.
     await h.controller.beginTurn('oc_chat', 'om-1', 'first turn');
-    await h.controller.handleEvent('feishu-session-1', reasoningEvent('analyzing…'));
+    await h.controller.handleAssistantStream('feishu-session-1', reasoningEvent('analyzing…'));
     await h.controller.handleEvent('feishu-session-1', turnEndEvent({ kind: 'completed' }));
     await new Promise((resolve) => setTimeout(resolve, 0)); // deferred final render
     const firstCardId = 'msg-1';
@@ -341,13 +453,13 @@ describe('StreamingCardController', () => {
     // later card made it non-live and the click fell through as "unretained".
     const h = makeController();
     await h.controller.beginTurn('oc_chat', 'om-1', 'first');
-    await h.controller.handleEvent('feishu-session-1', reasoningEvent('analyzing…'));
+    await h.controller.handleAssistantStream('feishu-session-1', reasoningEvent('analyzing…'));
     await h.controller.handleEvent('feishu-session-1', turnEndEvent({ kind: 'completed' }));
     await new Promise((resolve) => setTimeout(resolve, 0));
     const firstCardId = 'msg-1';
     // Turn 2 makes a NEW card live WITHOUT the first card being re-touched.
     await h.controller.beginTurn('oc_chat', 'om-2', 'second');
-    await h.controller.handleEvent('feishu-session-1', reasoningEvent('thinking…'));
+    await h.controller.handleAssistantStream('feishu-session-1', reasoningEvent('thinking…'));
     await h.controller.handleEvent('feishu-session-1', turnEndEvent({ kind: 'completed' }));
     await new Promise((resolve) => setTimeout(resolve, 0));
     const updatesBefore = h.transport.updatedTargets.length;
@@ -363,7 +475,7 @@ describe('StreamingCardController', () => {
   it('toggle-rows on an unretained historical card is ignored (no cross-wiring)', async () => {
     const h = makeController();
     await h.controller.beginTurn('oc_chat', 'om-1', 'T');
-    await h.controller.handleEvent('feishu-session-1', reasoningEvent('thinking…'));
+    await h.controller.handleAssistantStream('feishu-session-1', reasoningEvent('thinking…'));
     await h.controller.handleEvent('feishu-session-1', turnEndEvent({ kind: 'completed' }));
     await new Promise((resolve) => setTimeout(resolve, 0));
     const updatesBefore = h.transport.updatedTargets.length;
